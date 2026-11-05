@@ -1,0 +1,39 @@
+{
+  "name": "@zhalker/gentle-shell-codegraph-subagents",
+  "version": "0.2.0",
+  "description": "Pi package that keeps CodeGraph reachable from gentle-shell subagents: normalizes agent tool lists and the codegraph MCP exposure on every session start, and pre-fetches CodeGraph for the explorer.",
+  "license": "MIT",
+  "author": "zhalker",
+  "type": "module",
+  "keywords": [
+    "pi-package",
+    "pi",
+    "codegraph",
+    "subagents",
+    "gentle-shell",
+    "gentle-ai",
+    "mcp"
+  ],
+  "files": [
+    "extensions",
+    "src",
+    "skills",
+    "README.md",
+    "LICENSE"
+  ],
+  "pi": {
+    "extensions": [
+      "./extensions/index.ts"
+    ],
+    "skills": [
+      "./skills"
+    ]
+  },
+  "scripts": {
+    "test": "node --test \"test/*.test.ts\"",
+    "prepublishOnly": "npm test"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  }
+}
