@@ -60,4 +60,4 @@ Remove the package, then copy each `*.pre-codegraph-subagents.bak` over its orig
 
 ## Development
 
-`npm test` runs the unit tests with Node's built-in runner.
+`npm test` runs the unit tests with Node's built-in runner, through `scripts/run-tests.mjs`: unlike `node --test`, it fails when no test ran, so an empty or mistyped glob cannot pass `prepublishOnly`. Other globs can be passed as arguments (`node scripts/run-tests.mjs test/paths.test.ts`).
