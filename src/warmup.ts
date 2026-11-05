@@ -18,6 +18,15 @@ export interface ExploreOnceResult {
 	exploreMs: number;
 }
 
+export interface ExploreOnceOptions {
+	/**
+	 * Fire-and-forget use (the explorer's prefetch): the timer, the server and its pipes are unref'd, so a
+	 * warm-up still running never keeps its caller alive. The session's own warm-up leaves it off and still
+	 * holds the process until it has a result.
+	 */
+	background?: boolean;
+}
+
 /**
  * Talks MCP to `codegraph serve --mcp -p <project>` for the project in `cwd`, started from the temp dir (see
  * paths.ts) with the project spelled as its daemon registered it: initialize, one `codegraph_explore`, then closes stdin and
@@ -25,7 +34,7 @@ export interface ExploreOnceResult {
  * kills the process tree (that would take the daemon with it) and gives up waiting instead; it releases the
  * server's stdout so a server that never leaves cannot keep the process alive. Never rejects.
  */
-export function exploreOnce(cwd: string, query: string, timeoutMs: number, command: string = WARMUP_COMMAND): Promise<ExploreOnceResult> {
+export function exploreOnce(cwd: string, query: string, timeoutMs: number, command: string = WARMUP_COMMAND, options: ExploreOnceOptions = {}): Promise<ExploreOnceResult> {
 	return new Promise((resolve) => {
 		let settled = false;
 		let exploreStart = 0;
@@ -33,7 +42,8 @@ export function exploreOnce(cwd: string, query: string, timeoutMs: number, comma
 			if (settled) return;
 			settled = true;
 			clearTimeout(timer);
-			try { child?.stdin?.end(); } catch { /* already closed */ }
+			// Destroy, not end: an ended pipe still holds the event loop until the server exits.
+			try { child?.stdin?.destroy(); } catch { /* already closed */ }
 			// The server may never leave on its own: its piped stdout would keep the event loop of Pi alive.
 			try { child?.stdout?.destroy(); } catch { /* already gone */ }
 			child?.unref();
@@ -41,11 +51,17 @@ export function exploreOnce(cwd: string, query: string, timeoutMs: number, comma
 		};
 		let child: ReturnType<typeof spawn> | undefined;
 		const timer = setTimeout(() => finish(false), timeoutMs);
+		if (options.background === true) timer.unref?.();
 		const project = projectArgument(cwd);
 		try {
 			// Windows needs a shell for the .cmd shim; the command line is fixed plus the quoted project path.
 			const serve = serveCommand(command, project);
 			child = spawn(serve.command, { cwd: tmpdir(), env: { ...process.env, ...serve.env }, shell: true, windowsHide: true, stdio: ["pipe", "pipe", "ignore"] });
+			if (options.background === true) {
+				child.unref();
+				(child.stdin as (NodeJS.WritableStream & { unref?(): void }) | null)?.unref?.();
+				(child.stdout as (NodeJS.ReadableStream & { unref?(): void }) | null)?.unref?.();
+			}
 		} catch {
 			finish(false);
 			return;
@@ -86,6 +102,6 @@ export function exploreOnce(cwd: string, query: string, timeoutMs: number, comma
 }
 
 /** Makes the project's CodeGraph daemon open its database and start a read worker, so the next real call is fast. */
-export async function warmUpDaemon(cwd: string, timeoutMs: number = WARMUP_TIMEOUT_MS): Promise<boolean> {
-	return (await exploreOnce(cwd, WARMUP_QUERY, timeoutMs)).ok;
+export async function warmUpDaemon(cwd: string, timeoutMs: number = WARMUP_TIMEOUT_MS, options: ExploreOnceOptions = {}): Promise<boolean> {
+	return (await exploreOnce(cwd, WARMUP_QUERY, timeoutMs, WARMUP_COMMAND, options)).ok;
 }

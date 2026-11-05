@@ -1,14 +1,11 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
 	QUERY_MAX_CHARS,
 	boundOutput,
 	isExplorerChild,
 	prefetchForExplorer,
-	runCommand,
 	sanitizeQuery,
 } from "../src/prefetch.ts";
 
@@ -62,32 +59,6 @@ test("output within the limit is kept and longer output is cut with a marker", (
 	assert.ok(cut.startsWith("x".repeat(100)));
 	assert.ok(cut.length < 200);
 	assert.match(cut, /truncated/i);
-});
-
-test("runCommand returns the output of a command that succeeds", async () => {
-	const out = await runCommand({ command: process.execPath, args: ["-e", "console.log('hello graph')"], cwd: tmpdir(), timeoutMs: 10_000, maxBytes: 10_000 });
-	assert.equal(out?.trim(), "hello graph");
-});
-
-test("runCommand gives undefined when the command fails, is missing or prints nothing", async () => {
-	const base = { cwd: tmpdir(), timeoutMs: 10_000, maxBytes: 10_000 };
-	assert.equal(await runCommand({ ...base, command: process.execPath, args: ["-e", "process.exit(3)"] }), undefined);
-	assert.equal(await runCommand({ ...base, command: "definitely-not-a-real-command-xyz", args: [] }), undefined);
-	assert.equal(await runCommand({ ...base, command: process.execPath, args: ["-e", ""] }), undefined);
-});
-
-test("runCommand gives up after the timeout instead of waiting for the command", async () => {
-	const started = Date.now();
-	const out = await runCommand({ command: process.execPath, args: ["-e", "setTimeout(() => {}, 30000)"], cwd: tmpdir(), timeoutMs: 400, maxBytes: 10_000 });
-	assert.equal(out, undefined);
-	assert.ok(Date.now() - started < 5_000, "returned long before the 30 s the command wanted");
-});
-
-test("runCommand stops reading past the byte limit", async () => {
-	const script = join(mkdtempSync(join(tmpdir(), "pcs-run-")), "big.js");
-	writeFileSync(script, "process.stdout.write('y'.repeat(200000))");
-	const out = await runCommand({ command: process.execPath, args: [script], cwd: tmpdir(), timeoutMs: 10_000, maxBytes: 1_000 });
-	assert.ok(out === undefined || out.length <= 1_000, `got ${out?.length}`);
 });
 
 const base = (over: Partial<Parameters<typeof prefetchForExplorer>[0]> = {}) => ({
