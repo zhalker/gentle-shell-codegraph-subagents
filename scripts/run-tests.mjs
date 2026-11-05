@@ -1,6 +1,7 @@
 // `node --test` exits 0 when its glob matches nothing or the files hold no test, so a broken test layout
 // would pass `npm test` and `prepublishOnly`. This runs the same tests and fails unless at least one test
 // ran and none failed. Usage: node scripts/run-tests.mjs [glob...] (default: test/*.test.ts).
+import { availableParallelism } from "node:os";
 import { resolve } from "node:path";
 import { run } from "node:test";
 import { spec } from "node:test/reporters";
@@ -16,8 +17,8 @@ const countTest = (event) => {
 	realTests++;
 };
 
-// Test files in parallel processes, as `node --test` runs them.
-const stream = run({ globPatterns, concurrency: true });
+// Test files in parallel processes, as many at once as `node --test` runs by default.
+const stream = run({ globPatterns, concurrency: Math.max(1, availableParallelism() - 1) });
 stream.on("test:pass", countTest);
 stream.on("test:fail", countTest);
 stream.on("test:summary", (event) => {
