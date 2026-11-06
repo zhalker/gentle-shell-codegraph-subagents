@@ -1,12 +1,14 @@
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { getAgentDir, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { Text } from "@earendil-works/pi-tui";
 import { applyCodegraphSubagents, readExposureWarning, readMissingServerWarning } from "../src/apply.ts";
 import { prepareProject, runCodegraph, type SessionStartReason } from "../src/autoindex.ts";
 import { exploreViaDaemon } from "../src/daemonclient.ts";
 import { realInitLock } from "../src/initlock.ts";
-import { chooseIndexNotice, firstPromptMessage, INDEX_NOTICE_MARKER, logPrefetch, noticeTools, type PrefetchOutcome } from "../src/index-notice.ts";
+import { chooseIndexNotice, firstPromptMessage, INDEX_NOTICE_TYPE, logPrefetch, noticeTools, type PrefetchOutcome } from "../src/index-notice.ts";
 import { explorePerCase, prefetchForExplorer } from "../src/prefetch.ts";
+import { messageText, promptContext, promptMessageLine } from "../src/prompt-context.ts";
 import { warmUpDaemon } from "../src/warmup.ts";
 import { chooseSkillReminder, SKILL_REMINDER_TYPE } from "../src/skill-reminder.ts";
 
@@ -44,6 +46,20 @@ function startAutoIndex(reason: SessionStartReason, ctx: ExtensionContext): void
 // or a gentle-ai sync that rewrote the agent files is corrected on the next launch.
 export default function (pi: ExtensionAPI) {
 	let firstPromptSeen = false;
+	// The summary of a compaction drops the first-prompt message; the next user prompt may send it again.
+	pi.on("session_compact", () => {
+		firstPromptSeen = false;
+	});
+
+	// The first-prompt message as one short line that expands to the full text; what the model gets is unchanged.
+	// Only displayed messages are drawn, so a message sent again after a compaction never shows.
+	for (const customType of [SKILL_REMINDER_TYPE, INDEX_NOTICE_TYPE, "codegraph-prefetch"]) {
+		pi.registerMessageRenderer?.(customType, (message, options, theme) => {
+			const line = promptMessageLine(messageText(message.content), options.expanded, options.keyHint("app.tools.expand", options.expanded ? "to collapse" : "to expand"));
+			return new Text(theme.fg("customMessageText", line), options.outputPad, 0);
+		});
+	}
+
 	pi.on("session_start", async (event, ctx) => {
 		startAutoIndex(event.reason, ctx);
 		try {
@@ -70,8 +86,9 @@ export default function (pi: ExtensionAPI) {
 		try {
 			const isUserPrompt = event.messageType === "user";
 			const child = process.env.GENTLE_PI_AGENTS_CHILD === "1";
-			const branch = ctx.sessionManager.getBranch();
-			const alreadySent = firstPromptSeen || branch.some((entry) => entry.type === "custom_message" && entry.customType === SKILL_REMINDER_TYPE);
+			// Already sent means still in what the model sees: after a compaction both come back once.
+			const state = promptContext(ctx.sessionManager.getBranch());
+			const alreadySent = firstPromptSeen || state.reminderInContext;
 			const reminder = chooseSkillReminder({
 				expectedPath: join(import.meta.dirname, "..", "skills", "codegraph-workflow", "SKILL.md"),
 				skills: event.systemPromptOptions?.skills ?? [],
@@ -84,8 +101,7 @@ export default function (pi: ExtensionAPI) {
 				cwd: ctx.cwd,
 				selectedTools: noticeTools(event.systemPromptOptions?.selectedTools ?? [], process.env.GENTLE_PI_AGENTS_REQUESTED_TOOLS, child),
 				isUserPrompt,
-				alreadySent: branch.some((entry) =>
-					entry.type === "custom_message" && typeof entry.content === "string" && entry.content.includes(INDEX_NOTICE_MARKER)),
+				alreadySent: state.noticeInContext,
 			});
 			if (isUserPrompt) firstPromptSeen = true;
 			const prompt = isUserPrompt ? event.prompt : undefined;
@@ -112,7 +128,7 @@ export default function (pi: ExtensionAPI) {
 				},
 			});
 			if (outcome !== undefined) logPrefetch({ cwd: ctx.cwd, outcome, ms: Date.now() - started });
-			const message = firstPromptMessage({ notice, reminder, prefetch: content, child });
+			const message = firstPromptMessage({ notice, reminder, prefetch: content, child, afterCompaction: state.afterCompaction });
 			return message === undefined ? undefined : { message };
 		} catch {
 			return undefined;
