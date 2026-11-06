@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, realpathSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, realpathSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -30,4 +30,46 @@ export function daemonPids(dir: string): number[] {
 
 export function stopDaemon(dir: string): void {
 	for (const pid of daemonPids(dir)) spawnSync("taskkill", ["/pid", String(pid), "/F"], { stdio: "ignore" });
+}
+
+/** Built with String.fromCharCode so no shell or heredoc can eat the backslashes of a UNC path. */
+export const BACKSLASH = String.fromCharCode(92);
+
+/** A drive letter mapped to a network share and the UNC path behind it, if this machine has one; never written to. */
+export function mappedDrive(): { drive: string; unc: string } | undefined {
+	if (process.platform !== "win32") return undefined;
+	for (const letter of "DEFGHIJKLMNOPQRSTUVWXYZ") {
+		const drive = `${letter}:${BACKSLASH}`;
+		try {
+			const unc = realpathSync.native(drive);
+			if (unc.startsWith(BACKSLASH + BACKSLASH)) return { drive, unc };
+		} catch { /* not mapped or not reachable */ }
+	}
+	return undefined;
+}
+
+/** The same local directory through the administrative share (\\localhost\c$\...), if reachable. */
+export function adminShareOf(dir: string): string | undefined {
+	if (process.platform !== "win32" || !/^[A-Za-z]:\\/.test(dir)) return undefined;
+	const unc = `${BACKSLASH}${BACKSLASH}localhost${BACKSLASH}${dir[0].toLowerCase()}$${dir.slice(2)}`;
+	return existsSync(unc) ? unc : undefined;
+}
+
+/**
+ * A fake `codegraph` on a new PATH entry that records its working directory and arguments to `out` and
+ * exits 0. Windows gets a .cmd shim, as npm installs it; elsewhere an executable script.
+ */
+export function fakeCodegraph(out: string): { dir: string; restore(): void } {
+	const dir = mkdtempSync(join(tmpdir(), "pcs-fakecg-"));
+	const recorder = join(dir, "record.js");
+	writeFileSync(recorder, `require("node:fs").writeFileSync(${JSON.stringify(out)}, process.cwd() + "|" + process.argv.slice(2).join(" "));\n`);
+	if (process.platform === "win32") {
+		writeFileSync(join(dir, "codegraph.cmd"), `@echo off\r\n"${process.execPath}" "%~dp0record.js" %*\r\n`);
+	} else {
+		writeFileSync(join(dir, "codegraph"), `#!/bin/sh\nexec "${process.execPath}" "${recorder}" "$@"\n`);
+		chmodSync(join(dir, "codegraph"), 0o755);
+	}
+	const oldPath = process.env.PATH ?? "";
+	process.env.PATH = `${dir}${process.platform === "win32" ? ";" : ":"}${oldPath}`;
+	return { dir, restore: () => { process.env.PATH = oldPath; } };
 }
