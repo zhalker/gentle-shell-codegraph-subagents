@@ -112,7 +112,7 @@ export async function prefetchForExplorer(input: PrefetchInput): Promise<string 
 		const output = await input.explore(query, input.cwd);
 		if (output === undefined || output.trim().length === 0) return undefined;
 		return [
-			"CodeGraph pre-fetch for your task, run for you before your first step with `codegraph explore` (bounded in size and time).",
+			"CodeGraph pre-fetch for your task, answered by this project's CodeGraph daemon before your first step (bounded in size and time).",
 			`Use it as a starting point and call ${CODEGRAPH_MCP_TOOL} when you need more.`,
 			"",
 			boundOutput(output.trim()),

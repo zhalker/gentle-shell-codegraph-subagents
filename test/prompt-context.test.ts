@@ -8,7 +8,7 @@ import { SKILL_REMINDER_TYPE } from "../src/skill-reminder.ts";
 
 const NOTICE = `${INDEX_NOTICE_MARKER} This workspace HAS a CodeGraph index at C:\\project.`;
 const REMINDER = "For applicable code tasks, read and follow the codegraph-workflow skill at C:\\skills\\codegraph-workflow\\SKILL.md.";
-const PREFETCH = "CodeGraph pre-fetch for your task, run for you before your first step with `codegraph explore` (bounded in size and time).";
+const PREFETCH = "CodeGraph pre-fetch for your task, answered by this project's CodeGraph daemon before your first step (bounded in size and time).";
 
 const user = (id: string) => ({ type: "message", id });
 const sent = (id: string, customType: string, content: string) => ({ type: "custom_message", id, customType, content, display: true });

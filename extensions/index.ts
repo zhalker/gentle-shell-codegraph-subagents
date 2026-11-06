@@ -4,6 +4,7 @@ import { getAgentDir, type ExtensionAPI, type ExtensionContext } from "@earendil
 import { Text } from "@earendil-works/pi-tui";
 import { applyCodegraphSubagents, readExposureWarning, readMissingServerWarning } from "../src/apply.ts";
 import { prepareProject, runCodegraph, type SessionStartReason } from "../src/autoindex.ts";
+import { guardIndexCommand } from "../src/codegraph-guard.ts";
 import { exploreViaDaemon } from "../src/daemonclient.ts";
 import { realInitLock } from "../src/initlock.ts";
 import { chooseIndexNotice, firstPromptMessage, INDEX_NOTICE_TYPE, logPrefetch, noticeTools, type PrefetchOutcome } from "../src/index-notice.ts";
@@ -60,6 +61,20 @@ export default function (pi: ExtensionAPI) {
 		});
 	}
 
+	// A `codegraph index` from the model, often asked for by an AGENTS.md rule, would rebuild an index that exists and
+	// stop its daemon. Blocked with the reason and the escape hatch; init and sync run as before.
+	pi.on("tool_call", async (event, ctx) => {
+		try {
+			if (event.toolName !== "bash" && event.toolName !== "bash_background") return undefined;
+			const command = (event.input as { command?: unknown }).command;
+			if (typeof command !== "string") return undefined;
+			const reason = guardIndexCommand({ command, cwd: ctx.cwd });
+			return reason === undefined ? undefined : { block: true, reason };
+		} catch {
+			return undefined;
+		}
+	});
+
 	pi.on("session_start", async (event, ctx) => {
 		startAutoIndex(event.reason, ctx);
 		try {
@@ -103,6 +118,7 @@ export default function (pi: ExtensionAPI) {
 				isUserPrompt,
 				alreadySent: state.noticeInContext,
 			});
+			// The loaded context files are not inspected: a conflicting rule is neither detected nor reported.
 			if (isUserPrompt) firstPromptSeen = true;
 			const prompt = isUserPrompt ? event.prompt : undefined;
 			// Whatever the prefetch answers, its outcome goes to the log; a prompt never waits for it.
