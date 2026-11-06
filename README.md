@@ -1,12 +1,45 @@
 # @zhalker/gentle-shell-codegraph-subagents
 
-Pi package that keeps CodeGraph reachable from gentle-shell subagents. On every session start it checks the global agent definitions and `mcp.json` and fixes what gentle-ai or the gentle-pi package left behind. Nothing is rewritten when everything is already right.
-
-> **This package edits files in your Pi configuration.** On every session start it rewrites the agent definitions in `~/.pi/agent/agents/` and `~/.pi/agent/subagents/` and the `codegraph` entry in `~/.pi/agent/mcp.json`. It keeps a one-time backup of each file it changes as `<file>.pre-codegraph-subagents.bak`. Read "What it does" before installing, and see "Uninstall" to go back.
+Pi package that keeps CodeGraph reachable, and actually used, by gentle-shell subagents. Install it once: on every session start it fixes the agents' tool lists and the CodeGraph MCP exposure, keeps the project index synced and its daemon warm, and hands the explorer subagent CodeGraph's answer before it even starts.
 
 Upstream issue: Gentleman-Programming/gentle-shell#2804. License: MIT.
 
-## What it does
+## Features
+
+- **CodeGraph in every subagent that should have it.** On each session start the explorer, verifier, worker and judge agents get `mcp__codegraph__codegraph_explore` in their tool list, and stale gentle-ai blocks and dead proxy entries are removed. Review agents are left untouched.
+- **The MCP tool is really there.** `codegraph_explore` is exposed directly to subagents in `mcp.json`, keeping every other setting you made. If the CodeGraph server is missing, Pi tells you at startup.
+- **The model knows the index exists.** On the first prompt of a session, and of every subagent that holds a CodeGraph tool, the extension states that the project has an index and names the exact tools to call first. Models no longer "check" with find or grep, which never show the git-ignored `.codegraph/`.
+- **The explorer starts with an answer.** Before its first model call, the explorer subagent receives CodeGraph's answer for its task straight from the running daemon: about 75 ms on a local disk, typically 1-2 s on a network share.
+- **Always-fresh index.** Every new session syncs the index in the background, or creates it for a git project with a known manifest (`package.json`, `composer.json`, `go.mod`, `Cargo.toml` and more). Your session never waits for it.
+- **Warm from the first call.** After syncing, the extension warms the project's CodeGraph daemon, so the first real query is fast (~70 ms instead of ~650 ms locally). When an explorer finds no daemon, it starts one in the background for the next one.
+- **Built for Windows and network shares.** A mapped drive (`Y:\`) and its UNC path (`\\server\share`) are the same project, so no duplicate daemons. CodeGraph runs correctly on UNC folders, and any folder name reaches it intact (`%`, `&`, `^`, spaces).
+- **A CodeGraph workflow skill included.** The packaged `codegraph-workflow` skill tells the model when to use CodeGraph and when a plain read or grep is better, with a reminder on the first prompt of the session and of worker subagents.
+- **Safe to install, easy to undo.** It edits only the agent definitions in `~/.pi/agent/agents/` and `~/.pi/agent/subagents/` and the `codegraph` entry of `~/.pi/agent/mcp.json`. Each file is backed up once as `<file>.pre-codegraph-subagents.bak` before its first change, nothing is rewritten when everything is already right, and concurrent sessions coordinate through a per-project lock.
+- **Diagnosable.** Every explorer prefetch writes its outcome and duration to `~/.pi/agent/codegraph-subagents/prefetch.log`.
+
+## Why
+
+Gentle-shell subagents often skip CodeGraph and fall back to recursive grep: their tool lists lack it, the MCP server hides it from them, or the model decides there is no index because `.codegraph/` is git-ignored and invisible to `find` and `grep`. On network shares the CodeGraph file watcher does not work either, so the index goes stale. This package fixes each of those at session start.
+
+## Requirements
+
+- Pi with gentle-pi (gentle-shell subagents). Tested with Pi 1.4.0-1.5.0.
+- The CodeGraph CLI on Pi's `PATH`, and the `codegraph` MCP server configured.
+- Node 24.
+
+## Install
+
+```
+pi install npm:@zhalker/gentle-shell-codegraph-subagents
+```
+
+Changes apply on the next session start. Reinstalling, or running `gentle-ai sync` again, is corrected the same way on the following start.
+
+## Uninstall
+
+Remove the package, then copy each `*.pre-codegraph-subagents.bak` over its original if you want the previous files back.
+
+## How it works
 
 In `~/.pi/agent/agents/` and `~/.pi/agent/subagents/` (or `$PI_CODING_AGENT_DIR`):
 
@@ -35,31 +68,8 @@ In the directory where Pi starts, a new session also looks after the CodeGraph i
 
 Before the first change to a file it saves the original next to it as `<file>.pre-codegraph-subagents.bak`; later changes never overwrite that backup.
 
-## Install
+## Contributing
 
-```
-pi install npm:@zhalker/gentle-shell-codegraph-subagents
-```
+Issues and pull requests are welcome. `npm test` runs the unit tests with Node's built-in runner, through `scripts/run-tests.mjs`: unlike `node --test`, it fails when no test ran, so an empty or mistyped glob cannot pass `prepublishOnly`. Other globs can be passed as arguments (`node scripts/run-tests.mjs test/paths.test.ts`).
 
-Changes apply on the next session start. Reinstalling, or running `gentle-ai sync` again, is corrected the same way on the following start.
-
-## Uninstall
-
-Remove the package, then copy each `*.pre-codegraph-subagents.bak` over its original if you want the previous files back.
-
-## Known limits
-
-- Only the global agent directory is handled, not `<project>/.pi/agents/`.
-- The warm-up has only been measured on local disks, not on a network share. It never kills the processes it starts, because the daemon is shared with your own sessions.
-- CodeGraph's own `init` can hang when two start at once, or when a daemon opens the project just after the index is created. The package lock only coordinates sessions sharing the same user temp folder; it cannot prevent access by a terminal, another tool, another user, or Pi's own MCP connection. On Windows, if the session and shell exit before CodeGraph writes its own lock and that takes more than 60 seconds, the package cannot tell that init is still running. The 11-minute stale-lock limit can also expire while a process remains alive.
-- The index sync is a background command: a prefetch that runs before it finishes can see the previous index. The sync only looks at the directory where Pi starts, not at parents or subfolders. Treat prefetched results as navigation hints, not authoritative evidence: they can be stale, incomplete, truncated or incorrect; verify findings against source files.
-- Asking the daemon directly relies on two internal details of CodeGraph: the registry in `~/.codegraph/daemons/` and the hello line with `protocol: 1`. If either changes, or the daemon answers anything unexpected, the explorer adds nothing and the warm-up starts in the background instead. A daemon that is there but does not answer within 10 s is not retried.
-- A background warm-up dies with the explorer child that started it, so a child that ends within about 3 s warms nothing; a real explorer session lasts much longer. The 10 s prefetch limit was chosen from measured answers up to 8375 ms on a network share, and the daemon warm-up of a session start is awaited and keeps its own 120 s limit.
-- The explorer prefetch requires the launcher to set `GENTLE_PI_AGENTS_CHILD=1` and `GENTLE_PI_AGENTS_REQUESTED_TOOLS` to the child's declared comma-separated tool list. It recognizes a read-only child with the CodeGraph MCP tool and no writing tools; this declaration does not prove the MCP tool actually connected. Without these launcher variables the prefetch is skipped. The first 300 sanitized characters of the task become the query, so verbose instructions can broaden the result; the returned context is capped at 12,000 characters.
-- The rewrite of the explorer's own instructions matches known sentences; if gentle-pi rewords them, they are left as they are.
-- The `codegraph` MCP server has to be configured or registered by an extension; the package never creates it. When Pi is launched from a GUI or service, its `PATH` may differ from your shell. An absolute MCP server command can fix the server launch, but this package's `init` and `sync` still need `codegraph` on Pi's `PATH`.
-- Tested with Pi 1.4.0 and node 24.
-
-## Development
-
-`npm test` runs the unit tests with Node's built-in runner, through `scripts/run-tests.mjs`: unlike `node --test`, it fails when no test ran, so an empty or mistyped glob cannot pass `prepublishOnly`. Other globs can be passed as arguments (`node scripts/run-tests.mjs test/paths.test.ts`).
+Details on edge cases and design trade-offs: [docs/known-limits.md](docs/known-limits.md).
