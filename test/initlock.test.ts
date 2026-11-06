@@ -125,23 +125,38 @@ test("S17: an unusable lock directory never throws: the session simply goes on a
 	assert.equal(isInitLocked(project, { dir: join(tmpdir(), "pcs-does-not-exist", "nor-this") }), false);
 });
 
-function sessionTaking(dir: string, project: string, startAt: number, holdMs: number): Promise<{ status: string; pid: number }> {
-	return new Promise((resolve) => {
-		const child = spawn(process.execPath, [join(import.meta.dirname, "lock-worker.ts"), dir, project, String(startAt), String(holdMs)], { stdio: ["ignore", "pipe", "ignore"] });
-		let out = "";
-		child.stdout.on("data", (chunk) => (out += chunk));
-		child.on("close", () => {
-			try { resolve(JSON.parse(out.trim().split("\n")[0])); } catch { resolve({ status: `worker produced no result: ${out.slice(0, 80)}`, pid: 0 }); }
+/**
+ * `count` sessions that all try at `startAt`. The winner keeps the lock until every session has tried: on a busy
+ * machine a worker can reach the start line after a fixed hold has ended, and then it rightly takes the free lock.
+ */
+async function sessionsAtOnce(dir: string, project: string, count: number): Promise<{ status: string; pid: number }[]> {
+	const startAt = Date.now() + 800;
+	const sessions = Array.from({ length: count }, () => {
+		const child = spawn(process.execPath, [join(import.meta.dirname, "lock-worker.ts"), dir, project, String(startAt), "stdin"], { stdio: ["pipe", "pipe", "ignore"] });
+		// A busy session exits right after its answer, so its end is watched from the start.
+		const closed = new Promise<void>((resolve) => child.once("close", () => resolve()));
+		const result = new Promise<{ status: string; pid: number }>((resolve) => {
+			let out = "";
+			const done = () => {
+				try { resolve(JSON.parse(out.trim().split("\n")[0])); } catch { resolve({ status: `worker produced no result: ${out.slice(0, 80)}`, pid: 0 }); }
+			};
+			child.stdout.on("data", (chunk) => { out += chunk; if (out.includes("\n")) done(); });
+			void closed.then(done);
 		});
+		return { child, closed, result };
 	});
+	const results = await Promise.all(sessions.map((session) => session.result));
+	// Every session has tried: now the winner may let go.
+	for (const session of sessions) session.child.stdin.end();
+	await Promise.all(sessions.map((session) => session.closed));
+	return results;
 }
 
 test("S17: sessions that try at the very same instant: exactly one gets the lock, every time", async () => {
 	for (const sessions of [2, 4, 6]) {
 		for (let round = 0; round < 4; round++) {
 			const { dir, project } = scratch();
-			const startAt = Date.now() + 800;
-			const results = await Promise.all(Array.from({ length: sessions }, () => sessionTaking(dir, project, startAt, 300)));
+			const results = await sessionsAtOnce(dir, project, sessions);
 			const winners = results.filter((result) => result.status === "acquired").length;
 			const busy = results.filter((result) => result.status === "busy").length;
 			assert.deepEqual({ winners, busy }, { winners: 1, busy: sessions - 1 }, `${sessions} sessions, round ${round}: ${JSON.stringify(results)}`);
