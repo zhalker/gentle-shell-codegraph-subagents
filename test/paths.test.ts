@@ -1,5 +1,5 @@
 // One root identity, and codegraph never spawned with the project as its working directory.
-// Ported from the office patch (backlog row 1); the UNC cases use whatever mapped drive or admin share this machine has.
+// The UNC cases use whatever mapped drive or admin share this machine has.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
@@ -158,16 +158,24 @@ test("runCodegraph runs codegraph from the temp dir with the project as the last
 	assert.equal(await recordedRun(["init", "-y"], project), `${tmpdir()}|init -y ${project}`);
 });
 
-// cmd.exe expands %VAR% even inside quotes; & and ^ split or escape outside them. None of these is invalid in a folder name.
-const AWKWARD = ["a%OS%b", "a&b", "a^b", "a b", "it's", "x%"];
+// cmd.exe expands %VAR% even inside quotes; & and ^ split or escape outside them, | pipes and ( ) group.
+// None of this is invalid in a folder name, though Windows refuses `>` and cannot create that one: the
+// command line is what matters, so the path is used whether or not the folder exists.
+const AWKWARD = ["a%OS%b", "a&b", "a^b", "a b", "it's", "x%", "a&echo PWNED>PWNED.txt&rem c", "a|b", "a(b)c"];
+const PWNED = join(tmpdir(), "PWNED.txt");
+
+function makeProject(base: string, name: string): string {
+	const project = join(base, name);
+	try { mkdirSync(project); } catch { /* a name this platform cannot create */ }
+	return project;
+}
 
 test("runCodegraph hands codegraph the project path literally, whatever shell characters its folder name has", async () => {
 	const base = temp("pcs-awk-");
 	for (const name of AWKWARD) {
-		const project = join(base, name);
-		mkdirSync(project);
-		assert.equal(await recordedRun(["sync", "-q"], project), `${tmpdir()}|sync -q ${project}`, name);
+		assert.equal(await recordedRun(["sync", "-q"], makeProject(base, name)), `${tmpdir()}|sync -q ${makeProject(base, name)}`, name);
 	}
+	assert.equal(existsSync(PWNED), false, "a folder name must never become a second command");
 });
 
 test("runCodegraph works for a project given as a UNC path, which cmd.exe rejects as a working directory", { skip: adminShareOf(tmpdir()) === undefined && "no reachable administrative share" }, async () => {
@@ -194,10 +202,9 @@ test("the warm-up runs from the temp dir and names the project with -p, never as
 test("the warm-up hands the server the project path literally, whatever shell characters its folder name has", async () => {
 	const base = temp("pcs-warmawk-");
 	for (const name of AWKWARD) {
-		const project = join(base, name);
-		mkdirSync(project);
-		assert.equal(await recordedWarmUp(project), `${tmpdir()}|-p ${project}`, name);
+		assert.equal(await recordedWarmUp(makeProject(base, name)), `${tmpdir()}|-p ${makeProject(base, name)}`, name);
 	}
+	assert.equal(existsSync(PWNED), false, "a folder name must never become a second command");
 });
 
 test("the warm-up works for a project given as a UNC path", { skip: adminShareOf(tmpdir()) === undefined && "no reachable administrative share" }, async () => {

@@ -5,7 +5,7 @@ import { applyCodegraphSubagents, readExposureWarning, readMissingServerWarning 
 import { prepareProject, runCodegraph, type SessionStartReason } from "../src/autoindex.ts";
 import { exploreViaDaemon } from "../src/daemonclient.ts";
 import { realInitLock } from "../src/initlock.ts";
-import { PREFETCH_TIMEOUT_MS, exploreDaemonFirst, exploreWithCodegraph, prefetchForExplorer } from "../src/prefetch.ts";
+import { explorePerCase, prefetchForExplorer } from "../src/prefetch.ts";
 import { warmUpDaemon } from "../src/warmup.ts";
 import { chooseSkillReminder, SKILL_REMINDER_TYPE } from "../src/skill-reminder.ts";
 
@@ -62,8 +62,8 @@ export default function (pi: ExtensionAPI) {
 		}
 	});
 
-	// Only the explorer child: hand it `codegraph explore` for its task before its first model call.
-	// Without .codegraph, the CLI, or in time, the run goes on exactly as before.
+	// Only the explorer child: hand it the CodeGraph answer for its task before its first model call.
+	// With no index, no daemon or too slow a daemon, nothing is added and the daemon warm-up starts on its own.
 	pi.on("before_agent_start", async (event, ctx) => {
 		try {
 			const alreadySent = firstPromptSeen || ctx.sessionManager.getBranch().some((entry) => entry.type === "custom_message" && entry.customType === SKILL_REMINDER_TYPE);
@@ -80,14 +80,14 @@ export default function (pi: ExtensionAPI) {
 			const content = await prefetchForExplorer({
 				env: process.env,
 				prompt,
-				cwd: process.cwd(),
+				cwd: ctx.cwd,
 				exists: existsSync,
 				initRunning: (cwd) => realInitLock.isHeld(cwd),
-				explore: (query, cwd) =>
-					exploreDaemonFirst(query, cwd, {
-						daemon: (q, c) => exploreViaDaemon(c, q, PREFETCH_TIMEOUT_MS),
-						cli: exploreWithCodegraph,
-					}),
+				explore: async (query, cwd) =>
+					(await explorePerCase(query, cwd, {
+						daemon: (q, c, timeoutMs) => exploreViaDaemon(c, q, timeoutMs),
+						warm: (c) => warmUpDaemon(c, undefined, { background: true }),
+					})).text,
 			});
 			if (reminder) return { message: { customType: SKILL_REMINDER_TYPE, content: [reminder, content].filter(Boolean).join("\n\n"), display: false } };
 			if (content === undefined) return undefined;

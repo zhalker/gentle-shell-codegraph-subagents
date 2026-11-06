@@ -1,11 +1,12 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import net from "node:net";
+import { spawnSync } from "node:child_process";
 import { existsSync, mkdtempSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { exploreViaDaemon } from "../src/daemonclient.ts";
-import { exploreDaemonFirst, exploreWithCodegraph, prefetchForExplorer } from "../src/prefetch.ts";
+import { explorePerCase, prefetchForExplorer } from "../src/prefetch.ts";
 import { warmUpDaemon } from "../src/warmup.ts";
 import { daemonPids, hasCodegraph, indexedProject, stopDaemon } from "./helpers.ts";
 
@@ -148,20 +149,25 @@ test("S15: an error reply, or CodeGraph's 'no project' text, is unavailable", as
 	}
 });
 
-test("S18: an MCP reply with isError is unavailable, so the CLI answers instead of the explorer", async () => {
+test("S18: an MCP reply with isError is unavailable, so its text is never used as prefetch text", async () => {
 	// CodeGraph answers a crashed query worker this way: a text result, flagged as an error.
 	const daemon = await fakeDaemon({ explore: { text: "codegraph worker crashed; please retry the call.", isError: true } });
 	try {
 		const registryDir = registry([{ root: ROOT, socketPath: daemon.path }]);
 		assert.deepEqual(await exploreViaDaemon(ROOT, "q", 5_000, { registryDir }), { status: "unavailable" });
-		const text = await exploreDaemonFirst("q", ROOT, { daemon: (query, cwd) => exploreViaDaemon(cwd, query, 5_000, { registryDir }), cli: async () => "FROM CLI" });
-		assert.equal(text, "FROM CLI");
+		let warm = 0;
+		const result = await explorePerCase("q", ROOT, {
+			daemon: (query, cwd, timeoutMs) => exploreViaDaemon(cwd, query, timeoutMs, { registryDir }),
+			warm: () => { warm++; return Promise.resolve(true); },
+		});
+		assert.deepEqual(result, { text: undefined, outcome: "skipped-no-daemon" });
+		assert.equal(warm, 1);
 	} finally {
 		daemon.close();
 	}
 });
 
-test("S15: output beyond the cap is unavailable, so the CLI answers instead of memory growing", async () => {
+test("S15: output beyond the cap is unavailable, so nothing is prefetched instead of memory growing", async () => {
 	const daemon = await fakeDaemon({ explore: { text: "x".repeat(1_500_000) } });
 	try {
 		assert.deepEqual(await exploreViaDaemon(ROOT, "q", 10_000, { registryDir: registry([{ root: ROOT, socketPath: daemon.path }]) }), { status: "unavailable" });
@@ -224,33 +230,42 @@ test("S15: the project root matches whatever its spelling: trailing separator an
 	}
 });
 
-// --- The daemon-first composition used by the prefetch ---
+// --- The per-case composition used by the prefetch ---
 
-test("S15: daemon first: its text is used and the CLI is never started", async () => {
-	let cliCalls = 0;
-	const text = await exploreDaemonFirst("q", ROOT, {
+test("S15: a live daemon: its text is used and nothing is warmed", async () => {
+	let warm = 0;
+	const result = await explorePerCase("q", ROOT, {
 		daemon: async () => ({ status: "ok", text: "FROM DAEMON" }),
-		cli: async () => { cliCalls++; return "FROM CLI"; },
+		warm: () => { warm++; return Promise.resolve(true); },
 	});
-	assert.equal(text, "FROM DAEMON");
-	assert.equal(cliCalls, 0);
+	assert.deepEqual(result, { text: "FROM DAEMON", outcome: "ok" });
+	assert.equal(warm, 0);
 });
 
-test("S15: no usable daemon -> the CLI answers, exactly as before", async () => {
-	const text = await exploreDaemonFirst("q", ROOT, { daemon: async () => ({ status: "unavailable" }), cli: async () => "FROM CLI" });
-	assert.equal(text, "FROM CLI");
+test("S15: no usable daemon -> nothing is added at once and the warm-up starts once", async () => {
+	let warm = 0;
+	const started = Date.now();
+	const result = await explorePerCase("q", ROOT, {
+		daemon: async () => ({ status: "unavailable" }),
+		warm: () => { warm++; return new Promise<unknown>(() => { /* never settles */ }); },
+	});
+	assert.deepEqual(result, { text: undefined, outcome: "skipped-no-daemon" });
+	assert.equal(warm, 1);
+	assert.ok(Date.now() - started < 200, "the caller must not wait for the warm-up");
 });
 
-test("S15: a daemon timeout does not start a second, slower attempt through the CLI", async () => {
-	let cliCalls = 0;
-	const text = await exploreDaemonFirst("q", ROOT, { daemon: async () => ({ status: "timeout" }), cli: async () => { cliCalls++; return "FROM CLI"; } });
-	assert.equal(text, undefined);
-	assert.equal(cliCalls, 0);
+test("S15: a daemon timeout adds nothing and starts no second, warmer attempt", async () => {
+	let warm = 0;
+	const result = await explorePerCase("q", ROOT, { daemon: async () => ({ status: "timeout" }), warm: () => { warm++; return Promise.resolve(true); } });
+	assert.deepEqual(result, { text: undefined, outcome: "daemon-timeout" });
+	assert.equal(warm, 0);
 });
 
-test("S15: a throwing daemon client falls back to the CLI", async () => {
-	const text = await exploreDaemonFirst("q", ROOT, { daemon: async () => { throw new Error("boom"); }, cli: async () => "FROM CLI" });
-	assert.equal(text, "FROM CLI");
+test("S15: a throwing daemon client counts as no daemon", async () => {
+	let warm = 0;
+	const result = await explorePerCase("q", ROOT, { daemon: async () => { throw new Error("boom"); }, warm: () => { warm++; return Promise.resolve(true); } });
+	assert.deepEqual(result, { text: undefined, outcome: "skipped-no-daemon" });
+	assert.equal(warm, 1);
 });
 
 // --- Against the real CodeGraph ---
@@ -262,12 +277,16 @@ const timed = async <T>(run: () => Promise<T>) => {
 	return { value, ms: Date.now() - started };
 };
 
+/** The CLI's explore, kept only as the baseline the daemon's text is compared against. */
+const cliExplore = (dir: string, query: string): string =>
+	spawnSync(`codegraph explore ${query}`, { cwd: dir, shell: true, encoding: "utf8", maxBuffer: 64 * 1024 * 1024 }).stdout ?? "";
+
 test("S15 real: with the daemon alive, the pipe answers with the same text as the CLI, and faster", { skip: !hasCodegraph }, async () => {
 	const dir = indexedProject();
 	try {
 		stopDaemon(dir);
 		assert.equal(await warmUpDaemon(dir), true);
-		const cli = await timed(() => exploreWithCodegraph("warmFn1 run", dir));
+		const cli = await timed(async () => cliExplore(dir, "warmFn1 run"));
 		const direct = await timed(() => exploreViaDaemon(dir, "warmFn1 run", 20_000));
 		assert.equal(direct.value.status, "ok");
 		assert.equal(norm((direct.value as { text: string }).text), norm(cli.value));
@@ -288,24 +307,43 @@ test("S15 real: with no daemon it is unavailable and it does not start one", { s
 	}
 });
 
-test("S15 real: the explorer's prefetch gets the same content with or without a daemon, and starts no daemon", { skip: !hasCodegraph }, async () => {
-	const dir = indexedProject();
-	const input = {
+/** The explorer's prefetch as the extension wires it: the daemon answers, or the warm-up starts behind it. */
+function explorerInput(dir: string) {
+	return {
 		env: { GENTLE_PI_AGENTS_CHILD: "1", GENTLE_PI_AGENTS_REQUESTED_TOOLS: "read,grep,mcp__codegraph__codegraph_explore" },
 		prompt: "warmFn1 run",
 		cwd: dir,
 		exists: existsSync,
-		explore: (query: string, cwd: string) => exploreDaemonFirst(query, cwd, { daemon: (q, c) => exploreViaDaemon(c, q, 20_000), cli: exploreWithCodegraph }),
+		explore: async (query: string, cwd: string) =>
+			(await explorePerCase(query, cwd, {
+				daemon: (q, c, timeoutMs) => exploreViaDaemon(c, q, timeoutMs),
+				warm: (c) => warmUpDaemon(c, undefined, { background: true }),
+			})).text,
 	};
+}
+
+/** Asks the prefetch until its background warm-up has brought a daemon up, or the deadline passes. */
+async function prefetchUntilText(input: ReturnType<typeof explorerInput>, ms: number): Promise<string | undefined> {
+	const deadline = Date.now() + ms;
+	let text: string | undefined;
+	while (Date.now() < deadline) {
+		text = await prefetchForExplorer(input);
+		if (text !== undefined) return text;
+		await new Promise((resolve) => setTimeout(resolve, 250));
+	}
+	return text;
+}
+
+test("S15 real: no daemon: the prefetch adds nothing at once and its background warm-up serves the next one", { skip: !hasCodegraph }, async () => {
+	const dir = indexedProject();
 	try {
 		stopDaemon(dir);
-		const withoutDaemon = await prefetchForExplorer(input);
-		assert.equal(daemonPids(dir).length, 0, "the fallback must not start a daemon");
-		assert.equal(await warmUpDaemon(dir), true);
-		const withDaemon = await prefetchForExplorer(input);
-		assert.ok(withoutDaemon && withDaemon);
-		assert.match(withDaemon, /warmFn1/);
-		assert.equal(norm(withDaemon), norm(withoutDaemon));
+		const input = explorerInput(dir);
+		const started = Date.now();
+		assert.equal(await prefetchForExplorer(input), undefined, "with no daemon nothing is added");
+		assert.ok(Date.now() - started < 2_000, "the explorer must not wait for the warm-up");
+		const text = await prefetchUntilText(input, 120_000);
+		assert.match(String(text), /warmFn1/, "the next prefetch must find the daemon warm");
 	} finally {
 		stopDaemon(dir);
 	}
