@@ -1,11 +1,12 @@
 // Rules in a user's AGENTS.md can make the model rebuild the CodeGraph index before every search, which stops the
-// daemon this package keeps warm. The guard blocks that rebuild, and the user is told once per project.
+// daemon this package keeps warm. The guard blocks that rebuild and says what to do instead.
 import { test, type TestContext } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { ALLOW_ENV, conflictWarning, findRuleConflicts, guardIndexCommand, takeConflictNotice } from "../src/codegraph-guard.ts";
+import * as guard from "../src/codegraph-guard.ts";
+import { ALLOW_ENV, guardIndexCommand } from "../src/codegraph-guard.ts";
 import { prefetchForExplorer } from "../src/prefetch.ts";
 
 function scratch(t: TestContext): string {
@@ -19,9 +20,6 @@ function indexed(dir: string): string {
 	writeFileSync(join(dir, ".codegraph", "codegraph.db"), "");
 	return dir;
 }
-
-// The rule a user had in a global AGENTS.md, verbatim.
-const USER_RULE = 'Codegraph comes first: for every refactor, code fix, analysis or investigation, run a codegraph query or explore BEFORE any fd/find/rg/grep symbol search whenever the workspace has a .codegraph index; if no .codegraph folder exists, initialize the project by running "codegraph init" and "codegraph index" first, then query; ALWAYS refresh the index by running "codegraph sync" before any use or call to codegraph so searches run against the most updated data; fd/find/rg/grep only after codegraph, for exact-string or filename lookups, or when codegraph fails or the index could not be initialized. This includes subagents and worktrees: codegraph is workspace-scoped, in a worktree run operation init before the first query there, and when a subagent cannot call codegraph, the parent session runs the query and passes the findings in the task handoff';
 
 test("S1: codegraph index in a project that has an index is blocked, with the reason, what to do instead and the escape hatch", (t) => {
 	const root = indexed(scratch(t));
@@ -100,51 +98,6 @@ test("S5: the pre-fetch header says the daemon answered, not that codegraph expl
 	assert.doesNotMatch(String(text), /codegraph explore`/);
 });
 
-test("S3: the user's rule conflicts on index and on sync; a negated or occasional rule does not", () => {
-	assert.deepEqual(findRuleConflicts([{ path: "/home/u/.pi/agent/AGENTS.md", content: USER_RULE }]), [
-		{ path: "/home/u/.pi/agent/AGENTS.md", commands: ["index", "sync"] },
-	]);
-	assert.deepEqual(findRuleConflicts([
-		{ path: "a/AGENTS.md", content: "- Do not run `codegraph index` before every query.\n- Never run codegraph sync before each search." },
-		{ path: "b/AGENTS.md", content: "Run `codegraph sync` after a git pull or a branch switch." },
-		{ path: "c/AGENTS.md", content: "Look things up in the .codegraph folder first. Then grep." },
-		{ path: "d/CLAUDE.md", content: "Always run `codegraph init` before you start.\nRun codegraph sync every time you search." },
-	]), [{ path: "d/CLAUDE.md", commands: ["init", "sync"] }]);
-	assert.deepEqual(findRuleConflicts([]), []);
-});
-
-test("S3: the warning names the file, the reasons and the consequences, and says it shows once", () => {
-	const message = conflictWarning([{ path: "/home/u/.pi/agent/AGENTS.md", commands: ["index", "sync"] }]);
-	assert.ok(message.includes("/home/u/.pi/agent/AGENTS.md"));
-	assert.match(message, /codegraph index/);
-	assert.match(message, /codegraph sync/);
-	assert.match(message, /already creates and syncs the index/);
-	assert.match(message, /stops the daemon/);
-	assert.match(message, /slower/);
-	assert.match(message, /once per project/);
-});
-
-test("S4: the warning is taken once per project, survives a restart, and a damaged record does not break it", (t) => {
-	const state = join(scratch(t), "state");
-	const conflicts = [{ path: "AGENTS.md", commands: ["sync" as const] }];
-	const first = takeConflictNotice({ root: "C:\\work\\one", conflicts, stateDir: state });
-	assert.ok(first);
-	assert.equal(takeConflictNotice({ root: "C:\\work\\one", conflicts, stateDir: state }), undefined, "same project");
-	assert.equal(takeConflictNotice({ root: "C:\\work\\one", conflicts: [{ path: "OTHER.md", commands: ["index" as const] }], stateDir: state }), undefined, "edited files do not bring it back");
-	assert.ok(takeConflictNotice({ root: "C:\\work\\two", conflicts, stateDir: state }), "another project");
-	const record = readFileSync(join(state, "conflict-notices.json"), "utf8");
-	assert.ok(!record.includes("AGENTS.md"), "only projects are recorded, never file names or contents");
-	writeFileSync(join(state, "conflict-notices.json"), "{ damaged");
-	assert.ok(takeConflictNotice({ root: "C:\\work\\three", conflicts, stateDir: state }), "a damaged record is read as empty");
-	assert.equal(takeConflictNotice({ root: "C:\\work\\three", conflicts, stateDir: state }), undefined);
-});
-
-test("S4: nothing to warn about records nothing, and a state directory that cannot be written still warns without throwing", (t) => {
-	const dir = scratch(t);
-	assert.equal(takeConflictNotice({ root: "C:\\work\\one", conflicts: [], stateDir: join(dir, "state") }), undefined);
-	assert.equal(existsSync(join(dir, "state", "conflict-notices.json")), false);
-	const file = join(dir, "not-a-directory");
-	writeFileSync(file, "keep");
-	assert.doesNotThrow(() => takeConflictNotice({ root: "C:\\work\\one", conflicts: [{ path: "AGENTS.md", commands: ["sync"] }], stateDir: file }));
-	assert.equal(readFileSync(file, "utf8"), "keep");
+test("S3: the guard only blocks commands; it no longer detects rules, warns about conflicts or keeps notice state", () => {
+	assert.deepEqual(Object.keys(guard).sort(), ["ALLOW_ENV", "findIndexRoot", "guardIndexCommand"]);
 });

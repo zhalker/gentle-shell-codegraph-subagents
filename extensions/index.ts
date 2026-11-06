@@ -4,10 +4,9 @@ import { getAgentDir, type ExtensionAPI, type ExtensionContext } from "@earendil
 import { Text } from "@earendil-works/pi-tui";
 import { applyCodegraphSubagents, readExposureWarning, readMissingServerWarning } from "../src/apply.ts";
 import { prepareProject, runCodegraph, type SessionStartReason } from "../src/autoindex.ts";
-import { findRuleConflicts, guardIndexCommand, takeConflictNotice } from "../src/codegraph-guard.ts";
+import { guardIndexCommand } from "../src/codegraph-guard.ts";
 import { exploreViaDaemon } from "../src/daemonclient.ts";
 import { realInitLock } from "../src/initlock.ts";
-import { canonicalRoot } from "../src/paths.ts";
 import { chooseIndexNotice, firstPromptMessage, INDEX_NOTICE_TYPE, logPrefetch, noticeTools, type PrefetchOutcome } from "../src/index-notice.ts";
 import { explorePerCase, prefetchForExplorer } from "../src/prefetch.ts";
 import { messageText, promptContext, promptMessageLine } from "../src/prompt-context.ts";
@@ -119,11 +118,7 @@ export default function (pi: ExtensionAPI) {
 				isUserPrompt,
 				alreadySent: state.noticeInContext,
 			});
-			// Loaded context files whose rules fight the extension: the user is told once per project, never the model.
-			if (isUserPrompt && !child && !firstPromptSeen && ctx.hasUI) {
-				const warning = takeConflictNotice({ root: canonicalRoot(ctx.cwd), conflicts: findRuleConflicts(event.systemPromptOptions?.contextFiles ?? []) });
-				if (warning !== undefined) ctx.ui.notify(warning, "warning");
-			}
+			// The loaded context files are not inspected: a conflicting rule is neither detected nor reported.
 			if (isUserPrompt) firstPromptSeen = true;
 			const prompt = isUserPrompt ? event.prompt : undefined;
 			// Whatever the prefetch answers, its outcome goes to the log; a prompt never waits for it.
