@@ -3,7 +3,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
+import net from "node:net";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { canonicalRoot, codegraphSpawn, foldRoot, PROJECT_ENV, serveCommand } from "../src/paths.ts";
@@ -25,6 +26,25 @@ function registry(records: Record<string, unknown>[]): string {
 	return reg;
 }
 
+let sockets = 0;
+/** A socket path nothing listens on: the named pipe or socket file of a daemon that is gone. */
+const goneSocket = () => {
+	const name = `pcs-paths-${process.pid}-${++sockets}`;
+	return process.platform === "win32" ? `${B}${B}.${B}pipe${B}${name}` : join(tmpdir(), `${name}.sock`);
+};
+/** Socket paths that something listens on, the way a live daemon's do; closed after the test. */
+async function liveSockets(t: { after(fn: () => void): void }, count: number): Promise<string[]> {
+	const paths: string[] = [];
+	for (let i = 0; i < count; i++) {
+		const path = goneSocket();
+		const server = net.createServer((socket) => socket.destroy());
+		await new Promise<void>((done) => server.listen(path, done));
+		t.after(() => server.close());
+		paths.push(path);
+	}
+	return paths;
+}
+
 test("foldRoot: case folding only on Windows; trailing separators go, roots stay roots", () => {
 	assert.equal(foldRoot(`C:${B}Users${B}me${B}`, "win32"), `c:${B}users${B}me`);
 	assert.equal(foldRoot(`C:${B}`, "win32"), `c:${B}`);
@@ -34,12 +54,13 @@ test("foldRoot: case folding only on Windows; trailing separators go, roots stay
 	assert.equal(foldRoot("/Users/Me/Repo", "darwin"), "/Users/Me/Repo");
 });
 
-test("canonicalRoot: a local root is one identity in any letter case or with a trailing separator; a missing path falls back to resolve", () => {
+test("canonicalRoot: a local root is one identity in any letter case or with a trailing separator; a missing path keeps its nearest existing parent's identity", () => {
 	const local = temp("pcs-local-");
 	if (process.platform === "win32") assert.equal(canonicalRoot(local.toUpperCase()), canonicalRoot(local));
 	assert.equal(canonicalRoot(local + (process.platform === "win32" ? B : "/")), canonicalRoot(local));
 	const missing = join(local, "no", "such", "Dir");
-	assert.equal(canonicalRoot(missing), foldRoot(resolve(missing)));
+	assert.equal(canonicalRoot(missing), foldRoot(join(realpathSync.native(local), "no", "such", "Dir")));
+	assert.equal(canonicalRoot(resolve("/")), foldRoot(realpathSync.native(resolve("/"))));
 	// daemonclient keeps exporting normalizeRoot for its callers; it is the same identity now.
 	assert.equal(normalizeRoot(local), canonicalRoot(local));
 });
@@ -50,6 +71,16 @@ test("canonicalRoot: a local root keeps the identity 0.2.0 gave it, so its init-
 	let real = realpathSync(local);
 	if (process.platform === "win32") real = real.toLowerCase();
 	assert.equal(key(canonicalRoot(local)), key(real));
+});
+
+test("canonicalRoot: a path that cannot be resolved still goes through the links above it, so it does not change identity once it can be", () => {
+	const target = temp("pcs-target-");
+	const link = join(temp("pcs-link-"), "link");
+	symlinkSync(target, link, "junction");
+	const unresolved = join(link, "not-yet", "Dir");
+	assert.equal(canonicalRoot(unresolved), canonicalRoot(join(target, "not-yet", "Dir")));
+	mkdirSync(join(target, "not-yet", "Dir"), { recursive: true });
+	assert.equal(canonicalRoot(unresolved), foldRoot(join(realpathSync.native(target), "not-yet", "Dir")));
 });
 
 test("canonicalRoot: a mapped drive and the UNC path behind it are one root", { skip: mapped === undefined && "no mapped network drive on this machine" }, () => {
@@ -68,11 +99,12 @@ test("registeredRoot: the spelling the newest daemon registered, in any spelling
 	assert.equal(registeredRoot(local, join(reg, "missing")), undefined);
 });
 
-test("registeredRoot: a live daemon wins over a newer dead record, whose spelling would start a duplicate", () => {
+test("registeredRoot: a live daemon wins over a newer dead record, whose spelling would start a duplicate", async (t) => {
 	const local = temp("pcs-alive-");
 	const other = process.platform === "win32" ? local.toUpperCase() : local;
+	const [a] = await liveSockets(t, 1);
 	assert.equal(registeredRoot(local, registry([
-		{ root: local, socketPath: "a", startedAt: 1, pid: process.pid },
+		{ root: local, socketPath: a, startedAt: 1, pid: process.pid },
 		{ root: other, socketPath: "b", startedAt: 2, pid: DEAD_PID },
 	])), local);
 	// With nothing alive, the newest record still names the project.
@@ -82,25 +114,36 @@ test("registeredRoot: a live daemon wins over a newer dead record, whose spellin
 	])), other);
 });
 
-test("registeredRoot: a missing or non-numeric pid is never taken as alive", { skip: process.platform !== "win32" && "needs a case-insensitive spelling" }, () => {
+test("registeredRoot: a missing or non-numeric pid is never taken as alive", { skip: process.platform !== "win32" && "needs a case-insensitive spelling" }, async (t) => {
 	const proj = temp("pcs-pid-");
+	const [a, b] = await liveSockets(t, 2);
 	for (const bad of [undefined, "99999", true, null]) {
 		const reg = registry([
-			{ root: proj, socketPath: "a", startedAt: 9, pid: bad },
-			{ root: proj.toUpperCase(), socketPath: "b", startedAt: 1, pid: process.pid },
+			{ root: proj, socketPath: a, startedAt: 9, pid: bad },
+			{ root: proj.toUpperCase(), socketPath: b, startedAt: 1, pid: process.pid },
 		]);
 		assert.equal(registeredRoot(proj, reg), proj.toUpperCase(), `pid=${String(bad)} must not win as alive`);
 		assert.equal(registeredRoot(proj, registry([{ root: proj, socketPath: "a", startedAt: 9, pid: bad }])), proj);
 	}
 });
 
-test("registeredRoot: of two live records the newest wins; a single record is returned as it is", { skip: process.platform !== "win32" && "needs a case-insensitive spelling" }, () => {
+test("registeredRoot: of two live records the newest wins; a single record is returned as it is", { skip: process.platform !== "win32" && "needs a case-insensitive spelling" }, async (t) => {
 	const proj = temp("pcs-two-");
+	const [a, b] = await liveSockets(t, 2);
 	assert.equal(registeredRoot(proj, registry([
-		{ root: proj, socketPath: "a", startedAt: 1, pid: process.pid },
-		{ root: proj.toUpperCase(), socketPath: "b", startedAt: 9, pid: process.ppid },
+		{ root: proj, socketPath: a, startedAt: 1, pid: process.pid },
+		{ root: proj.toUpperCase(), socketPath: b, startedAt: 9, pid: process.ppid },
 	])), proj.toUpperCase());
 	assert.equal(registeredRoot(proj, registry([{ root: proj.toUpperCase(), socketPath: "a", startedAt: 5, pid: DEAD_PID }])), proj.toUpperCase());
+});
+
+test("registeredRoot: a running pid whose daemon socket is gone is a dead record, since the system reused that pid", { skip: process.platform !== "win32" && "needs a case-insensitive spelling" }, async (t) => {
+	const proj = temp("pcs-reuse-");
+	const [live] = await liveSockets(t, 1);
+	assert.equal(registeredRoot(proj, registry([
+		{ root: proj, socketPath: live, startedAt: 1, pid: process.pid },
+		{ root: proj.toUpperCase(), socketPath: goneSocket(), startedAt: 9, pid: process.pid },
+	])), proj);
 });
 
 test("registeredRoot: a daemon registered for a child or a sibling folder is never selected for the parent", () => {

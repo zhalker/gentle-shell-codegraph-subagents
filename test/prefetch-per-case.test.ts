@@ -91,10 +91,10 @@ test("S15: a rejected warm-up leaves no unhandled rejection behind", async () =>
 	assert.deepEqual(seen, []);
 });
 
-test("S15: a daemon client that throws counts as no daemon and still warms once", async () => {
+test("S15: a daemon client that throws is logged apart from a missing daemon and still warms once", async () => {
 	const { calls, deps: d } = deps(undefined);
 	d.daemon = async () => { calls.daemon++; throw new Error("boom"); };
-	assert.deepEqual(await explorePerCase("q", PROJECT, d), { text: undefined, outcome: "skipped-no-daemon" });
+	assert.deepEqual(await explorePerCase("q", PROJECT, d), { text: undefined, outcome: "daemon-error" });
 	assert.equal(calls.warm, 1);
 });
 

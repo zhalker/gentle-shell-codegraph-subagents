@@ -1,6 +1,6 @@
 import { realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 
 // One root identity and one way to start codegraph.
 //
@@ -17,7 +17,8 @@ import { resolve } from "node:path";
 // Linux and macOS: realpathSync.native is realpath(3) and the JS realpathSync "behaves like realpath(3)"
 // except for case conversion (Node fs docs), so the canonical form does not change there. There are no drive
 // letters or UNC paths. Case is folded only on win32. With musl libc, native realpath needs /proc; when it
-// fails the plain realpath, then resolve, take over.
+// fails the plain realpath takes over. A path neither can resolve (missing, EPERM, EACCES) keeps the resolved
+// identity of its nearest resolvable parent, with the rest appended, so links and mapped drives above it fold.
 
 /** Lower case and no trailing separator on Windows; only the trailing separator elsewhere. Roots stay roots. */
 export function foldRoot(path: string, platform: NodeJS.Platform = process.platform): string {
@@ -26,13 +27,21 @@ export function foldRoot(path: string, platform: NodeJS.Platform = process.platf
 	return platform === "win32" ? out.toLowerCase() : out;
 }
 
+/** Resolve a path as far as it can be resolved; an unresolved tail rides on its parent's resolved path. */
+function unfoldRoot(path: string): string {
+	try { return realpathSync.native(path); } catch {
+		try { return realpathSync(path); } catch {
+			const parent = dirname(path);
+			// At the filesystem root there is no parent left: resolve's value is the answer.
+			if (parent === path) return path;
+			return join(unfoldRoot(parent), basename(path));
+		}
+	}
+}
+
 /** The identity of a project root: symlinks resolved, and on Windows the mapped drive turned into its UNC path. */
 export function canonicalRoot(path: string, platform: NodeJS.Platform = process.platform): string {
-	let real: string;
-	try { real = realpathSync.native(path); } catch {
-		try { real = realpathSync(path); } catch { real = resolve(path); }
-	}
-	return foldRoot(real, platform);
+	return foldRoot(unfoldRoot(resolve(path)), platform);
 }
 
 /** The environment variable that carries the project path to a shell command line. */

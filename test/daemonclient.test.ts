@@ -5,7 +5,7 @@ import { spawnSync } from "node:child_process";
 import { existsSync, mkdtempSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { exploreViaDaemon } from "../src/daemonclient.ts";
+import { DAEMON_HELLO_TIMEOUT_MS, exploreViaDaemon } from "../src/daemonclient.ts";
 import { explorePerCase, prefetchForExplorer } from "../src/prefetch.ts";
 import { warmUpDaemon } from "../src/warmup.ts";
 import { daemonPids, hasCodegraph, indexedProject, stopDaemon } from "./helpers.ts";
@@ -188,6 +188,36 @@ test("S15: a daemon that never answers is a timeout, reported on time", async ()
 	}
 });
 
+test("S15: a daemon that never says hello gives way to the next one instead of using the whole budget", async () => {
+	const silent = await fakeDaemon({ hello: null });
+	const live = await fakeDaemon({});
+	try {
+		const started = Date.now();
+		const result = await exploreViaDaemon(ROOT, "q", 10_000, { registryDir: registry([
+			{ root: ROOT, socketPath: silent.path, startedAt: 2 },
+			{ root: ROOT, socketPath: live.path, startedAt: 1 },
+		]) });
+		assert.deepEqual(result, { status: "ok", text: "FAKE EXPLORE OUTPUT" });
+		assert.ok(Date.now() - started < DAEMON_HELLO_TIMEOUT_MS + 2_000, `took ${Date.now() - started} ms`);
+	} finally {
+		silent.close();
+		live.close();
+	}
+});
+
+test("S15: when the only daemon never says hello, it is a timeout reported after the hello wait, not after the whole budget", async () => {
+	const silent = await fakeDaemon({ hello: null });
+	try {
+		const started = Date.now();
+		const result = await exploreViaDaemon(ROOT, "q", 10_000, { registryDir: registry([{ root: ROOT, socketPath: silent.path }]) });
+		assert.deepEqual(result, { status: "timeout" });
+		const took = Date.now() - started;
+		assert.ok(took >= DAEMON_HELLO_TIMEOUT_MS - 50 && took < DAEMON_HELLO_TIMEOUT_MS + 2_000, `took ${took} ms`);
+	} finally {
+		silent.close();
+	}
+});
+
 test("S15: no registry, an empty one, or another project's daemon is unavailable", async () => {
 	const daemon = await fakeDaemon({});
 	try {
@@ -261,10 +291,10 @@ test("S15: a daemon timeout adds nothing and starts no second, warmer attempt", 
 	assert.equal(warm, 0);
 });
 
-test("S15: a throwing daemon client counts as no daemon", async () => {
+test("S15: a throwing daemon client is logged as daemon-error and still warms once", async () => {
 	let warm = 0;
 	const result = await explorePerCase("q", ROOT, { daemon: async () => { throw new Error("boom"); }, warm: () => { warm++; return Promise.resolve(true); } });
-	assert.deepEqual(result, { text: undefined, outcome: "skipped-no-daemon" });
+	assert.deepEqual(result, { text: undefined, outcome: "daemon-error" });
 	assert.equal(warm, 1);
 });
 
