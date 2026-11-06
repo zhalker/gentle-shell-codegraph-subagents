@@ -17,7 +17,14 @@ this skill is available.
   CodeGraph before broad symbol searches.
 - Do not run `codegraph index` before every query.
 - Do not initialize or update an index independently of the package's
-  startup policy or explicit user authorization.
+  startup policy, unless the user explicitly requests it.
+- Honor an explicit user request to index or fully reindex. First check
+  for ongoing initialization, indexing, or synchronization where possible;
+  do not start another operation while one is running. If you cannot tell
+  whether it is safe, explain the uncertainty instead of assuming it is.
+- If the extension blocks an explicitly requested rebuild because an index
+  already exists, use the escape hatch named in the block reason. Do not use
+  it to bypass the guard for routine instructions.
 - Treat CodeGraph results as navigation hints, not authoritative source.
   Confirm relevant behavior and findings against the source files.
 
