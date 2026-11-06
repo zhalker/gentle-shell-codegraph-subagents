@@ -1,4 +1,6 @@
 // Entry point for the lock tests: one "session" trying to take the init lock at a given instant.
+// A hold of "stdin" keeps an acquired lock until the test closes this worker's stdin, so a session that reaches
+// the start line late still finds the lock taken instead of taking it after the winner let it go.
 // With mode "orphan" it hands the lock to a long-running child of its own and exits at once without releasing,
 // like a Pi that dies while its init goes on.
 // With mode "shell" it starts the init the way the package does on Windows (through a shell) and adopts the
@@ -36,6 +38,10 @@ if (mode === "shell" && attempt.status === "acquired") {
 }
 console.log(JSON.stringify({ status: attempt.status, pid: process.pid }));
 if (attempt.status === "acquired") {
-	await new Promise((resolve) => setTimeout(resolve, Number(holdMs)));
+	if (holdMs === "stdin") {
+		await new Promise((resolve) => { process.stdin.on("end", resolve); process.stdin.on("close", resolve); process.stdin.resume(); });
+	} else {
+		await new Promise((resolve) => setTimeout(resolve, Number(holdMs)));
+	}
 	attempt.release();
 }

@@ -1,7 +1,8 @@
 import net from "node:net";
-import { readdirSync, readFileSync, realpathSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { join, resolve, sep } from "node:path";
+import { join } from "node:path";
+import { canonicalRoot } from "./paths.ts";
 
 /** The hello line a CodeGraph daemon sends carries `protocol`; this is the only one spoken here. */
 export const DAEMON_PROTOCOL = 1;
@@ -22,29 +23,69 @@ export interface DaemonOptions {
 	registryDir?: string;
 }
 
-/** The same project can be spelled with another letter case or a trailing separator. */
-export function normalizeRoot(path: string): string {
-	let real: string;
-	try { real = realpathSync(path); } catch { real = resolve(path); }
-	while (real.length > 1 && (real.endsWith(sep) || real.endsWith("/")) && !/^[A-Za-z]:[\\/]$/.test(real)) real = real.slice(0, -1);
-	return process.platform === "win32" ? real.toLowerCase() : real;
+/**
+ * The same project can be spelled with another letter case or a trailing separator, and on Windows as a
+ * mapped drive (Y:\...) or as the UNC path behind it (\\server\share\...). One
+ * canonical form for every root comparison (see paths.ts); kept under this name for its callers.
+ */
+export const normalizeRoot = (path: string): string => canonicalRoot(path);
+
+const DEFAULT_REGISTRY = () => join(homedir(), ".codegraph", "daemons");
+
+interface RegisteredDaemon {
+	root: string;
+	socketPath: string;
+	startedAt: number;
+	pid?: number;
 }
 
-/** Named pipes of the daemons registered for `root`, newest first. Reads the registry only; starts nothing. */
-function socketsFor(root: string, registryDir: string): string[] {
+/** Whether a process with this pid exists; signal 0 only checks. EPERM means it exists under another user. */
+function processAlive(pid: number): boolean {
+	try { process.kill(pid, 0); return true; } catch (error) { return (error as NodeJS.ErrnoException).code === "EPERM"; }
+}
+
+/** Daemons registered for `root` in any spelling, newest first. Reads the registry only; starts nothing. */
+function daemonsFor(root: string, registryDir: string): RegisteredDaemon[] {
 	let files: string[];
 	try { files = readdirSync(registryDir).filter((file) => file.endsWith(".json")); } catch { return []; }
 	const wanted = normalizeRoot(root);
-	const found: { socketPath: string; startedAt: number }[] = [];
+	const found: RegisteredDaemon[] = [];
 	for (const file of files) {
 		try {
 			const entry = JSON.parse(readFileSync(join(registryDir, file), "utf8"));
 			if (typeof entry.root !== "string" || typeof entry.socketPath !== "string") continue;
 			if (normalizeRoot(entry.root) !== wanted) continue;
-			found.push({ socketPath: entry.socketPath, startedAt: typeof entry.startedAt === "number" ? entry.startedAt : 0 });
+			found.push({
+				root: entry.root,
+				socketPath: entry.socketPath,
+				startedAt: typeof entry.startedAt === "number" ? entry.startedAt : 0,
+				pid: typeof entry.pid === "number" ? entry.pid : undefined,
+			});
 		} catch { /* a damaged record is not a daemon */ }
 	}
-	return found.sort((a, b) => b.startedAt - a.startedAt).map((entry) => entry.socketPath);
+	return found.sort((a, b) => b.startedAt - a.startedAt);
+}
+
+/** Named pipes of the daemons registered for `root`, newest first. */
+function socketsFor(root: string, registryDir: string): string[] {
+	return daemonsFor(root, registryDir).map((entry) => entry.socketPath);
+}
+
+/**
+ * How the newest daemon of this project spells its root, or undefined when none is registered. Passing that
+ * spelling to codegraph keeps it on the same daemon: CodeGraph keys daemons by the path it was given, and
+ * W:\project next to w:\project already runs two daemons for one project on this machine.
+ */
+export function registeredRoot(root: string, registryDir: string = DEFAULT_REGISTRY()): string | undefined {
+	const daemons = daemonsFor(root, registryDir);
+	// Dead records stay in the registry; the spelling of a live daemon keeps codegraph on that daemon.
+	const alive = daemons.find((entry) => entry.pid !== undefined && processAlive(entry.pid));
+	return (alive ?? daemons[0])?.root;
+}
+
+/** The path to hand to the codegraph CLI for this project: the registered spelling when there is one. */
+export function projectArgument(root: string, registryDir?: string): string {
+	return registeredRoot(root, registryDir) ?? root;
 }
 
 /** One conversation with one daemon: hello, initialize, one codegraph_explore. */
@@ -109,7 +150,7 @@ function ask(socketPath: string, query: string, timeoutMs: number): Promise<Daem
  */
 export async function exploreViaDaemon(root: string, query: string, timeoutMs: number, options: DaemonOptions = {}): Promise<DaemonExploreResult> {
 	try {
-		const registryDir = options.registryDir ?? join(homedir(), ".codegraph", "daemons");
+		const registryDir = options.registryDir ?? DEFAULT_REGISTRY();
 		const deadline = Date.now() + timeoutMs;
 		for (const socketPath of socketsFor(root, registryDir)) {
 			const result = await ask(socketPath, query, deadline - Date.now());

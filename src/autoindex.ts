@@ -2,6 +2,8 @@ import { spawn } from "node:child_process";
 import { join } from "node:path";
 import { codegraphWritingIndex, type InitLock } from "./initlock.ts";
 import { killTree } from "./prefetch.ts";
+import { projectArgument } from "./daemonclient.ts";
+import { codegraphSpawn } from "./paths.ts";
 
 export { codegraphWritingIndex } from "./initlock.ts";
 
@@ -93,7 +95,9 @@ export async function autoIndex(input: AutoIndexInput): Promise<AutoIndexResult>
 const KILL_WAIT_MS = 10_000;
 
 /**
- * Runs the codegraph CLI with fixed arguments; the project is the working directory, never an argument.
+ * Runs the codegraph CLI with fixed arguments for the project in `cwd`. It runs from
+ * the temp dir with the project as the last argument (`sync -q <path>`, `init -y <path>`), spelled as its
+ * daemon registered it; cmd.exe does not accept a UNC working directory, and another spelling starts another daemon.
  * `onSpawn` gets the pid of the process, which the init lock records, and whether that pid is only the shell
  * that was spawned around the real init (Windows runs the npm shim through a shell). A timeout kills the
  * process tree and only reports the failure once that process is gone: its pid must not outlive the result.
@@ -115,9 +119,11 @@ export function runCodegraph(args: string[], cwd: string, timeoutMs: number, onS
 		// that shell, not the process that ends up writing the index.
 		const shelled = process.platform === "win32";
 		try {
-			child = shelled
-				? spawn(["codegraph", ...args].join(" "), { cwd, shell: true, windowsHide: true, stdio: "ignore" })
-				: spawn("codegraph", args, { cwd, windowsHide: true, stdio: "ignore" });
+			const run = codegraphSpawn(args, projectArgument(cwd));
+			const env = { ...process.env, ...run.env };
+			child = run.shell
+				? spawn(run.command, { cwd: run.cwd, env, shell: true, windowsHide: true, stdio: "ignore" })
+				: spawn(run.command, run.args, { cwd: run.cwd, env, windowsHide: true, stdio: "ignore" });
 		} catch {
 			resolve(false);
 			return;

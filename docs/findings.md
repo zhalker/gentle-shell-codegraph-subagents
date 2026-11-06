@@ -54,3 +54,16 @@ No package found that normalizes gentle-shell agent definitions and the MCP expo
 ## Dry run of the normalizer against the real agent files (2026-11-03, nothing written to ~/.pi/agent/agents)
 
 All 10 files change, are idempotent on a second pass, and end with the expected `tools:` (MCP tool on explore, verify, worker, jd-fix-agent and both judges; review-* untouched apart from the removed blocks). The explorer's own body (package-owned, outside the markers) said to use the cwd-scoped `codegraph` tool and `operation: "init"`, a tool it no longer has after S2. The owner asked to rewrite those lines (S9, T7, done).
+
+## Network shares and the explorer prefetch (office trial 2026-11-04/05, ported 2026-11-05)
+
+Observed on Windows with projects on SMB mapped drives; the trial notes and measurements are outside this repository. The specs of the port live in `odd/tasks/office-patch-port.md`.
+
+- Subagent children run with the UNC working directory (`\server\share\...`), while the main session and the daemon it registers use the drive letter (`Y:\...`). `realpathSync.native` turns the drive into its UNC path, so roots are compared in that form (`src/paths.ts`).
+- cmd.exe, which Windows needs for the npm `.cmd` shim, does not accept a UNC working directory: it runs the command in `C:\Windows` instead. Before the port, `codegraph sync -q` for a UNC project ran there, and the explorer's CLI prefetch failed with no trace. codegraph now runs from the temp folder with the project as an argument.
+- cmd.exe expands `%VAR%` even inside double quotes: a folder `a%OS%b` reached codegraph as `aWindows_NTb`. The project path travels in an environment variable and the command line only references it. With delayed expansion enabled in the registry, `!VAR!` would still expand; it is off by default.
+- CodeGraph keys daemons by the path spelling it is given: `W:\project` and `w:\project` ran two daemons for one project. Dead records stay in `~/.codegraph/daemons`, so the spelling of a live daemon is preferred.
+- `codegraph explore` through the CLI opens the index in its own process every time (2.5-6 s on SMB) and starts no daemon; `codegraph serve --mcp` does start one. A warm daemon answered in 0.5-2 s, the slowest real prefetch in 8375 ms, hence the 10 s limit and no CLI fallback.
+- The rule "if `.codegraph/` exists, use CodeGraph" was checked by models with Pi's `find`/`grep`, which respect `.gitignore`; `.codegraph/.gitignore` ignores everything in the folder, so they concluded there was no index. Hence the index notice.
+- The CodeGraph file watcher fails on SMB (`File watcher error ... UNKNOWN: unknown error, watch` in `.codegraph/daemon.log`), so the session-start `codegraph sync` is what keeps the index current there.
+- `node --test` exits 0 when its glob matches nothing, and the published package carries no `test/`; `npm test` now fails when no test ran.

@@ -5,7 +5,8 @@ import { applyCodegraphSubagents, readExposureWarning, readMissingServerWarning 
 import { prepareProject, runCodegraph, type SessionStartReason } from "../src/autoindex.ts";
 import { exploreViaDaemon } from "../src/daemonclient.ts";
 import { realInitLock } from "../src/initlock.ts";
-import { PREFETCH_TIMEOUT_MS, exploreDaemonFirst, exploreWithCodegraph, prefetchForExplorer } from "../src/prefetch.ts";
+import { chooseIndexNotice, firstPromptMessage, INDEX_NOTICE_MARKER, logPrefetch, noticeTools, type PrefetchOutcome } from "../src/index-notice.ts";
+import { explorePerCase, prefetchForExplorer } from "../src/prefetch.ts";
 import { warmUpDaemon } from "../src/warmup.ts";
 import { chooseSkillReminder, SKILL_REMINDER_TYPE } from "../src/skill-reminder.ts";
 
@@ -62,36 +63,57 @@ export default function (pi: ExtensionAPI) {
 		}
 	});
 
-	// Only the explorer child: hand it `codegraph explore` for its task before its first model call.
-	// Without .codegraph, the CLI, or in time, the run goes on exactly as before.
+	// First prompt of a session: the skill reminder and, when there is an index, the notice that says so.
+	// Only the explorer child: hand it the CodeGraph answer for its task before its first model call.
+	// With no index, no daemon or too slow a daemon, nothing is added and the daemon warm-up starts on its own.
 	pi.on("before_agent_start", async (event, ctx) => {
 		try {
-			const alreadySent = firstPromptSeen || ctx.sessionManager.getBranch().some((entry) => entry.type === "custom_message" && entry.customType === SKILL_REMINDER_TYPE);
+			const isUserPrompt = event.messageType === "user";
+			const child = process.env.GENTLE_PI_AGENTS_CHILD === "1";
+			const branch = ctx.sessionManager.getBranch();
+			const alreadySent = firstPromptSeen || branch.some((entry) => entry.type === "custom_message" && entry.customType === SKILL_REMINDER_TYPE);
 			const reminder = chooseSkillReminder({
 				expectedPath: join(import.meta.dirname, "..", "skills", "codegraph-workflow", "SKILL.md"),
 				skills: event.systemPromptOptions?.skills ?? [],
-				child: process.env.GENTLE_PI_AGENTS_CHILD === "1",
+				child,
 				systemPrompt: event.systemPrompt,
 				alreadySent,
-				isUserPrompt: event.messageType === "user",
+				isUserPrompt,
 			});
-			if (event.messageType === "user") firstPromptSeen = true;
-			const prompt = event.messageType === "user" ? event.prompt : undefined;
+			const notice = chooseIndexNotice({
+				cwd: ctx.cwd,
+				selectedTools: noticeTools(event.systemPromptOptions?.selectedTools ?? [], process.env.GENTLE_PI_AGENTS_REQUESTED_TOOLS, child),
+				isUserPrompt,
+				alreadySent: branch.some((entry) =>
+					entry.type === "custom_message" && typeof entry.content === "string" && entry.content.includes(INDEX_NOTICE_MARKER)),
+			});
+			if (isUserPrompt) firstPromptSeen = true;
+			const prompt = isUserPrompt ? event.prompt : undefined;
+			// Whatever the prefetch answers, its outcome goes to the log; a prompt never waits for it.
+			let outcome: PrefetchOutcome | undefined;
+			const started = Date.now();
 			const content = await prefetchForExplorer({
 				env: process.env,
 				prompt,
-				cwd: process.cwd(),
+				cwd: ctx.cwd,
 				exists: existsSync,
-				initRunning: (cwd) => realInitLock.isHeld(cwd),
-				explore: (query, cwd) =>
-					exploreDaemonFirst(query, cwd, {
-						daemon: (q, c) => exploreViaDaemon(c, q, PREFETCH_TIMEOUT_MS),
-						cli: exploreWithCodegraph,
-					}),
+				initRunning: (cwd) => {
+					const held = realInitLock.isHeld(cwd);
+					if (held) outcome = "skipped-init-running";
+					return held;
+				},
+				explore: async (query, cwd) => {
+					const result = await explorePerCase(query, cwd, {
+						daemon: (q, c, timeoutMs) => exploreViaDaemon(c, q, timeoutMs),
+						warm: (c) => warmUpDaemon(c, undefined, { background: true }),
+					});
+					outcome = result.outcome;
+					return result.text;
+				},
 			});
-			if (reminder) return { message: { customType: SKILL_REMINDER_TYPE, content: [reminder, content].filter(Boolean).join("\n\n"), display: false } };
-			if (content === undefined) return undefined;
-			return { message: { customType: "codegraph-prefetch", content, display: false } };
+			if (outcome !== undefined) logPrefetch({ cwd: ctx.cwd, outcome, ms: Date.now() - started });
+			const message = firstPromptMessage({ notice, reminder, prefetch: content, child });
+			return message === undefined ? undefined : { message };
 		} catch {
 			return undefined;
 		}

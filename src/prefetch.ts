@@ -3,10 +3,8 @@ import { join } from "node:path";
 import { CODEGRAPH_MCP_TOOL } from "./agents.ts";
 import type { DaemonExploreResult } from "./daemonclient.ts";
 
-export const PREFETCH_TIMEOUT_MS = 20_000;
 export const PREFETCH_MAX_CHARS = 12_000;
 export const QUERY_MAX_CHARS = 300;
-const READ_LIMIT_BYTES = 200_000;
 
 const REQUESTED_TOOLS_ENV = "GENTLE_PI_AGENTS_REQUESTED_TOOLS";
 const CHILD_ENV = "GENTLE_PI_AGENTS_CHILD";
@@ -39,16 +37,6 @@ export function boundOutput(text: string, max = PREFETCH_MAX_CHARS): string {
 	return text.length <= max ? text : `${text.slice(0, max)}\n\n[truncated: output cut at ${max} characters]`;
 }
 
-export interface RunOptions {
-	command: string;
-	args: string[];
-	cwd: string;
-	timeoutMs: number;
-	maxBytes: number;
-	/** Windows needs a shell to run the .cmd shim that npm installs for codegraph. */
-	shell?: boolean;
-}
-
 export function killTree(pid: number | undefined, child: { kill(): boolean }): void {
 	if (process.platform === "win32" && pid !== undefined) {
 		try {
@@ -59,79 +47,45 @@ export function killTree(pid: number | undefined, child: { kill(): boolean }): v
 	try { child.kill(); } catch { /* already gone */ }
 }
 
-/** Output of a command that exits 0 and prints something; undefined for anything else. Never rejects. */
-export function runCommand(options: RunOptions): Promise<string | undefined> {
-	return new Promise((resolve) => {
-		let settled = false;
-		const finish = (value: string | undefined) => {
-			if (settled) return;
-			settled = true;
-			clearTimeout(timer);
-			resolve(value);
-		};
-		let child;
-		try {
-			child = options.shell
-				? spawn([options.command, ...options.args].join(" "), { cwd: options.cwd, shell: true, windowsHide: true, stdio: ["ignore", "pipe", "ignore"] })
-				: spawn(options.command, options.args, { cwd: options.cwd, windowsHide: true, stdio: ["ignore", "pipe", "ignore"] });
-		} catch {
-			resolve(undefined);
-			return;
-		}
-		const timer = setTimeout(() => {
-			killTree(child.pid, child);
-			finish(undefined);
-		}, options.timeoutMs);
-		const chunks: Buffer[] = [];
-		let size = 0;
-		child.stdout?.on("data", (chunk: Buffer) => {
-			size += chunk.length;
-			if (size > options.maxBytes) {
-				killTree(child.pid, child);
-				finish(Buffer.concat(chunks).toString("utf8").slice(0, options.maxBytes));
-				return;
-			}
-			chunks.push(chunk);
-		});
-		child.on("error", () => finish(undefined));
-		child.on("close", (code) => {
-			const text = Buffer.concat(chunks).toString("utf8");
-			finish(code === 0 && text.trim().length > 0 ? text : undefined);
-		});
-	});
-}
+/**
+ * A warm daemon answers in about 0.5-2 s; 10 s leaves room for the slowest one seen, a real prefetch on a
+ * network share that answered in 8375 ms. The CLI is not a fallback: it opens the index in its own
+ * process every time (2.5-6 s on SMB) and starts no daemon, so it would warm nothing.
+ */
+export const DAEMON_PREFETCH_TIMEOUT_MS = 10_000;
 
-/** The CLI's explore output is the same as the codegraph_explore MCP tool. */
-export function exploreWithCodegraph(query: string, cwd: string): Promise<string | undefined> {
-	const windows = process.platform === "win32";
-	return runCommand({
-		command: "codegraph",
-		args: windows ? ["explore", ...query.split(" ")] : ["explore", query],
-		cwd,
-		timeoutMs: PREFETCH_TIMEOUT_MS,
-		maxBytes: READ_LIMIT_BYTES,
-		shell: windows,
-	});
-}
+export type PerCaseOutcome = "ok" | "daemon-timeout" | "skipped-no-daemon" | "empty";
 
-export interface DaemonFirstDeps {
-	daemon(query: string, cwd: string): Promise<DaemonExploreResult>;
-	cli(query: string, cwd: string): Promise<string | undefined>;
+export interface PerCaseDeps {
+	daemon(query: string, cwd: string, timeoutMs: number): Promise<DaemonExploreResult>;
+	/** Starts the project daemon; called without waiting for it. */
+	warm(cwd: string): Promise<unknown>;
 }
 
 /**
- * Asks the project daemon first; only when there is no usable one does the CLI answer, as it always did.
- * A daemon that was there but too slow is not retried through the CLI, which would be slower still.
+ * A live daemon is asked with {@link DAEMON_PREFETCH_TIMEOUT_MS}. With no usable daemon the explorer does not
+ * wait at all: the CLI is not run, and the warm-up starts in the background so the next explorer finds the
+ * daemon warm. Never rejects.
  */
-export async function exploreDaemonFirst(query: string, cwd: string, deps: DaemonFirstDeps): Promise<string | undefined> {
+export async function explorePerCase(query: string, cwd: string, deps: PerCaseDeps): Promise<{ text: string | undefined; outcome: PerCaseOutcome }> {
+	let result: DaemonExploreResult | undefined;
 	try {
-		const result = await deps.daemon(query, cwd);
-		if (result.status === "ok") return result.text;
-		if (result.status === "timeout") return undefined;
+		result = await deps.daemon(query, cwd, DAEMON_PREFETCH_TIMEOUT_MS);
 	} catch {
-		// Anything unexpected in the daemon path means the CLI takes over.
+		// Anything unexpected in the daemon path counts as no daemon.
+		result = undefined;
 	}
-	return deps.cli(query, cwd);
+	if (result?.status === "ok") {
+		return result.text.trim().length > 0 ? { text: result.text, outcome: "ok" } : { text: undefined, outcome: "empty" };
+	}
+	// Too slow: the daemon is up and busy, so warming it again would only add a second slower attempt.
+	if (result?.status === "timeout") return { text: undefined, outcome: "daemon-timeout" };
+	try {
+		deps.warm(cwd).catch(() => { /* a failed warm-up only means the next explorer waits for nothing too */ });
+	} catch {
+		// Same: never worth failing the prompt.
+	}
+	return { text: undefined, outcome: "skipped-no-daemon" };
 }
 
 export interface PrefetchInput {
@@ -151,7 +105,7 @@ export async function prefetchForExplorer(input: PrefetchInput): Promise<string 
 		const query = sanitizeQuery(input.prompt);
 		if (query.length === 0) return undefined;
 		if (!input.exists(join(input.cwd, ".codegraph"))) return undefined;
-		// A daemon or CLI call while an init builds the index can hang that init for good, so this waits for the next run.
+		// A read call while an init builds the index can hang that init for good, so this waits for the next run.
 		if (input.initRunning?.(input.cwd)) return undefined;
 		const output = await input.explore(query, input.cwd);
 		if (output === undefined || output.trim().length === 0) return undefined;
