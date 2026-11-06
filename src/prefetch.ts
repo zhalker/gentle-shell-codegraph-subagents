@@ -54,7 +54,7 @@ export function killTree(pid: number | undefined, child: { kill(): boolean }): v
  */
 export const DAEMON_PREFETCH_TIMEOUT_MS = 10_000;
 
-export type PerCaseOutcome = "ok" | "daemon-timeout" | "skipped-no-daemon" | "empty";
+export type PerCaseOutcome = "ok" | "daemon-timeout" | "daemon-error" | "skipped-no-daemon" | "empty";
 
 export interface PerCaseDeps {
 	daemon(query: string, cwd: string, timeoutMs: number): Promise<DaemonExploreResult>;
@@ -69,10 +69,12 @@ export interface PerCaseDeps {
  */
 export async function explorePerCase(query: string, cwd: string, deps: PerCaseDeps): Promise<{ text: string | undefined; outcome: PerCaseOutcome }> {
 	let result: DaemonExploreResult | undefined;
+	let threw = false;
 	try {
 		result = await deps.daemon(query, cwd, DAEMON_PREFETCH_TIMEOUT_MS);
 	} catch {
-		// Anything unexpected in the daemon path counts as no daemon.
+		// Anything unexpected in the daemon path is logged apart from a missing daemon, and treated the same.
+		threw = true;
 		result = undefined;
 	}
 	if (result?.status === "ok") {
@@ -85,7 +87,7 @@ export async function explorePerCase(query: string, cwd: string, deps: PerCaseDe
 	} catch {
 		// Same: never worth failing the prompt.
 	}
-	return { text: undefined, outcome: "skipped-no-daemon" };
+	return { text: undefined, outcome: threw ? "daemon-error" : "skipped-no-daemon" };
 }
 
 export interface PrefetchInput {

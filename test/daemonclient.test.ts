@@ -261,10 +261,10 @@ test("S15: a daemon timeout adds nothing and starts no second, warmer attempt", 
 	assert.equal(warm, 0);
 });
 
-test("S15: a throwing daemon client counts as no daemon", async () => {
+test("S15: a throwing daemon client is logged as daemon-error and still warms once", async () => {
 	let warm = 0;
 	const result = await explorePerCase("q", ROOT, { daemon: async () => { throw new Error("boom"); }, warm: () => { warm++; return Promise.resolve(true); } });
-	assert.deepEqual(result, { text: undefined, outcome: "skipped-no-daemon" });
+	assert.deepEqual(result, { text: undefined, outcome: "daemon-error" });
 	assert.equal(warm, 1);
 });
 

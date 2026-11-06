@@ -83,7 +83,9 @@ export function logPrefetch(
 ): void {
 	try {
 		mkdirSync(dir, { recursive: true });
-		appendFileSync(join(dir, "prefetch.log"), `${new Date().toISOString()}\t${entry.outcome}\t${entry.ms}ms\t${entry.cwd}\n`);
+		// Control characters become "?" so a tab or line break in a folder name cannot split or forge a record.
+		const cwd = entry.cwd.replace(/[\u0000-\u001f\u007f]/g, "?");
+		appendFileSync(join(dir, "prefetch.log"), `${new Date().toISOString()}\t${entry.outcome}\t${entry.ms}ms\t${cwd}\n`);
 	} catch {
 		// Logging must never break a prompt.
 	}
@@ -106,8 +108,9 @@ export interface PromptMessage {
 }
 
 /**
- * The one message the first prompt carries. The skill reminder gives the type, then the notice, then the
- * pre-fetch; only a notice shown to the main session is displayed in the transcript. Children keep it hidden.
+ * The one message the first prompt carries. The type follows precedence reminder, then notice, then pre-fetch;
+ * its content is the notice, then the reminder, then the pre-fetch. Only a notice shown to the main session is
+ * displayed in the transcript; children keep it hidden.
  */
 export function firstPromptMessage(input: FirstPromptParts): PromptMessage | undefined {
 	const part = (text: string | undefined): string | undefined => (text !== undefined && text.length > 0 ? text : undefined);

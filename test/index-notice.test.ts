@@ -130,6 +130,18 @@ test("S1: one log line per prefetch, tab separated: ISO time, outcome, Nms, cwd"
 	assert.match(lines[1], /^[^\t]+\tskipped-init-running\t3ms\t\\\\server\\share$/);
 });
 
+test("S1: a directory name with tabs or line breaks stays inside its own line and field", (t) => {
+	const dir = scratchDir(t);
+	logPrefetch({ cwd: "/srv/a\tb\nc\r\nd\u0000e", outcome: "ok", ms: 1 }, dir);
+	logPrefetch({ cwd: "/srv/x\n2026-01-01T00:00:00.000Z\tok\t1ms\t/forged", outcome: "empty", ms: 2 }, dir);
+	const lines = readFileSync(join(dir, "prefetch.log"), "utf8").split("\n");
+	assert.equal(lines.length, 3, "two calls, two lines");
+	assert.deepEqual(lines.slice(0, 2).map((line) => line.split("\t").length), [4, 4]);
+	assert.equal(lines[0].split("\t")[3], "/srv/a?b?c??d?e");
+	assert.equal(lines[1].split("\t")[1], "empty");
+	assert.equal(lines[1].split("\t")[3], "/srv/x?2026-01-01T00:00:00.000Z?ok?1ms?/forged");
+});
+
 test("S1: logging never breaks a prompt, even when the log directory cannot be created", (t) => {
 	const file = join(scratchDir(t), "not-a-directory");
 	writeFileSync(file, "keep");
