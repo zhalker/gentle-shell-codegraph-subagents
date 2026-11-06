@@ -99,6 +99,8 @@ export interface FirstPromptParts {
 	/** The CodeGraph pre-fetch of an explorer child, when it produced anything. */
 	prefetch?: string;
 	child: boolean;
+	/** The session was compacted before: this message brings back what the summary dropped, never displayed. */
+	afterCompaction?: boolean;
 }
 
 export interface PromptMessage {
@@ -110,7 +112,7 @@ export interface PromptMessage {
 /**
  * The one message the first prompt carries. The type follows precedence reminder, then notice, then pre-fetch;
  * its content is the notice, then the reminder, then the pre-fetch. Only a notice shown to the main session is
- * displayed in the transcript; children keep it hidden.
+ * displayed in the transcript; children keep it hidden, and so does every message sent again after a compaction.
  */
 export function firstPromptMessage(input: FirstPromptParts): PromptMessage | undefined {
 	const part = (text: string | undefined): string | undefined => (text !== undefined && text.length > 0 ? text : undefined);
@@ -120,5 +122,5 @@ export function firstPromptMessage(input: FirstPromptParts): PromptMessage | und
 	const content = [notice, reminder, prefetch].filter((text): text is string => text !== undefined).join("\n\n");
 	if (content.length === 0) return undefined;
 	const customType = reminder !== undefined ? SKILL_REMINDER_TYPE : notice !== undefined ? INDEX_NOTICE_TYPE : "codegraph-prefetch";
-	return { customType, content, display: !input.child && notice !== undefined };
+	return { customType, content, display: !input.child && input.afterCompaction !== true && notice !== undefined };
 }
