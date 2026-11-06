@@ -1,5 +1,5 @@
 import net from "node:net";
-import { readdirSync, readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { canonicalRoot } from "./paths.ts";
@@ -8,6 +8,8 @@ import { canonicalRoot } from "./paths.ts";
 export const DAEMON_PROTOCOL = 1;
 /** An explore answer is tens of kilobytes; anything near this size is not one worth keeping in memory. */
 export const MAX_REPLY_CHARS = 1_000_000;
+/** A daemon sends its hello line as soon as it accepts; one silent this long is hung, and the next one gets the rest of the budget. */
+export const DAEMON_HELLO_TIMEOUT_MS = 2_000;
 /** CodeGraph answers an explore without a project with this plain text, not with an error. */
 export const NO_PROJECT_TEXT = "No CodeGraph project is loaded";
 
@@ -44,6 +46,23 @@ function processAlive(pid: number): boolean {
 	try { process.kill(pid, 0); return true; } catch (error) { return (error as NodeJS.ErrnoException).code === "EPERM"; }
 }
 
+const PIPE_PREFIX = "\\\\.\\pipe\\";
+
+/**
+ * Whether a daemon socket is still there. A Windows named pipe is not a file: listing the pipe directory shows
+ * the live ones without connecting to them, and a listing that fails counts as present rather than risk missing
+ * a live daemon. Every other socket path is a socket file, which existsSync checks.
+ */
+function socketPresent(socketPath: string): boolean {
+	if (process.platform !== "win32" || !socketPath.toLowerCase().startsWith(PIPE_PREFIX)) return existsSync(socketPath);
+	const name = socketPath.slice(PIPE_PREFIX.length).toLowerCase();
+	try {
+		return readdirSync(PIPE_PREFIX).some((entry) => entry.toLowerCase() === name);
+	} catch {
+		return true;
+	}
+}
+
 /** Daemons registered for `root` in any spelling, newest first. Reads the registry only; starts nothing. */
 function daemonsFor(root: string, registryDir: string): RegisteredDaemon[] {
 	let files: string[];
@@ -78,8 +97,9 @@ function socketsFor(root: string, registryDir: string): string[] {
  */
 export function registeredRoot(root: string, registryDir: string = DEFAULT_REGISTRY()): string | undefined {
 	const daemons = daemonsFor(root, registryDir);
-	// Dead records stay in the registry; the spelling of a live daemon keeps codegraph on that daemon.
-	const alive = daemons.find((entry) => entry.pid !== undefined && processAlive(entry.pid));
+	// Dead records stay in the registry (CodeGraph owns those files), but they never win: a record is alive only
+	// while its process runs and its socket is still there, so a reused pid cannot make a stale spelling win.
+	const alive = daemons.find((entry) => entry.pid !== undefined && processAlive(entry.pid) && socketPresent(entry.socketPath));
 	return (alive ?? daemons[0])?.root;
 }
 
@@ -88,19 +108,26 @@ export function projectArgument(root: string, registryDir?: string): string {
 	return registeredRoot(root, registryDir) ?? root;
 }
 
+/** A socket that accepted but never said hello: the next one gets the rest of the budget. */
+type AskOutcome = DaemonExploreResult | { status: "silent" };
+
 /** One conversation with one daemon: hello, initialize, one codegraph_explore. */
-function ask(socketPath: string, query: string, timeoutMs: number): Promise<DaemonExploreResult> {
+function ask(socketPath: string, query: string, timeoutMs: number): Promise<AskOutcome> {
 	return new Promise((resolveResult) => {
 		let settled = false;
 		const socket = net.createConnection(socketPath);
-		const finish = (result: DaemonExploreResult) => {
+		const finish = (result: AskOutcome) => {
 			if (settled) return;
 			settled = true;
-			clearTimeout(timer);
+			clearTimeout(deadlineTimer);
+			clearTimeout(helloTimer);
 			socket.destroy();
 			resolveResult(result);
 		};
-		const timer = setTimeout(() => finish({ status: "timeout" }), Math.max(1, timeoutMs));
+		const budget = Math.max(1, timeoutMs);
+		const deadlineTimer = setTimeout(() => finish({ status: "timeout" }), budget);
+		// Only the hello line waits on this timer; the rest of the conversation keeps the whole budget.
+		const helloTimer = setTimeout(() => finish({ status: "silent" }), Math.max(1, Math.min(DAEMON_HELLO_TIMEOUT_MS, budget)));
 		const send = (message: object) => socket.write(JSON.stringify(message) + "\n");
 		let buffer = "";
 		let stage: "hello" | "initialize" | "explore" = "hello";
@@ -119,6 +146,7 @@ function ask(socketPath: string, query: string, timeoutMs: number): Promise<Daem
 				try { message = JSON.parse(line); } catch { return finish({ status: "unavailable" }); }
 				if (stage === "hello") {
 					if (typeof message.codegraph !== "string" || message.protocol !== DAEMON_PROTOCOL) return finish({ status: "unavailable" });
+					clearTimeout(helloTimer);
 					stage = "initialize";
 					send({
 						jsonrpc: "2.0",
@@ -152,11 +180,14 @@ export async function exploreViaDaemon(root: string, query: string, timeoutMs: n
 	try {
 		const registryDir = options.registryDir ?? DEFAULT_REGISTRY();
 		const deadline = Date.now() + timeoutMs;
+		let silent = false;
 		for (const socketPath of socketsFor(root, registryDir)) {
 			const result = await ask(socketPath, query, deadline - Date.now());
+			if (result.status === "silent") { silent = true; continue; }
 			if (result.status !== "unavailable") return result;
 		}
-		return { status: "unavailable" };
+		// A silent daemon is there but hung: warming another one would not make this query faster.
+		return silent ? { status: "timeout" } : { status: "unavailable" };
 	} catch {
 		return { status: "unavailable" };
 	}
