@@ -76,19 +76,36 @@ export function chooseIndexNotice(input: IndexNoticeInput): string | undefined {
 /** What the extension can record for one explorer prefetch: its own cases plus a held init lock, which skips it. */
 export type PrefetchOutcome = PerCaseOutcome | "skipped-init-running";
 
-/** Appends one line per explorer prefetch, so a failure that the model never sees can still be diagnosed. */
-export function logPrefetch(
-	entry: { cwd: string; outcome: PrefetchOutcome; ms: number },
-	dir: string = join(homedir(), ".pi", "agent", "codegraph-subagents"),
-): void {
+/** Appends one line of diagnostics to `file`; control characters in the folder become "?" so a record cannot be forged. */
+function appendLog(dir: string, file: string, entry: { cwd: string; outcome: string; ms: number }): void {
 	try {
 		mkdirSync(dir, { recursive: true });
-		// Control characters become "?" so a tab or line break in a folder name cannot split or forge a record.
 		const cwd = entry.cwd.replace(/[\u0000-\u001f\u007f]/g, "?");
-		appendFileSync(join(dir, "prefetch.log"), `${new Date().toISOString()}\t${entry.outcome}\t${entry.ms}ms\t${cwd}\n`);
+		appendFileSync(join(dir, file), `${new Date().toISOString()}\t${entry.outcome}\t${entry.ms}ms\t${cwd}\n`);
 	} catch {
 		// Logging must never break a prompt.
 	}
+}
+
+const DEFAULT_LOG_DIR = () => join(homedir(), ".pi", "agent", "codegraph-subagents");
+
+/** Appends one line per explorer prefetch, so a failure that the model never sees can still be diagnosed. */
+export function logPrefetch(
+	entry: { cwd: string; outcome: PrefetchOutcome; ms: number },
+	dir: string = DEFAULT_LOG_DIR(),
+): void {
+	appendLog(dir, "prefetch.log", entry);
+}
+
+/**
+ * Appends one line per compaction sync request. A compaction sync never notifies the session, not even when it
+ * failed, so this log is the only place its result can be seen.
+ */
+export function logSync(
+	entry: { cwd: string; outcome: string; ms: number },
+	dir: string = DEFAULT_LOG_DIR(),
+): void {
+	appendLog(dir, "sync.log", entry);
 }
 
 export interface FirstPromptParts {

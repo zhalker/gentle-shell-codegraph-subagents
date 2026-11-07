@@ -344,6 +344,138 @@ test("S17: subagent children and /reload never even look at the lock", async () 
 	}
 });
 
+// --- Coordination with the other sessions of this user: startup and compaction syncs never run at the same time. ---
+
+/** A coordinator that runs the attempt here and now, like a session that found the lease free. */
+const runsHere = (log?: string[]) => ({
+	request: async (project: string, attempt: (onSpawn: (pid: number, options?: { proxy?: boolean }) => void) => Promise<{ ran: boolean; ok?: boolean }>) => {
+		if (log !== undefined) log.push(`coordinate:${project}`);
+		const result = await attempt(() => {});
+		return result.ran ? { status: "ran" as const, ok: result.ok === true } : { status: "queued" as const };
+	},
+});
+
+test("S2: a startup sync goes through the coordinator, which runs the quiet command once", async () => {
+	const calls: Calls = [];
+	const seen: string[] = [];
+	const result = await autoIndex({
+		cwd: CWD, env: {}, reason: "startup", exists: withFiles(".codegraph"),
+		sync: runsHere(seen),
+		run: fakeRun(calls),
+	});
+	assert.deepEqual(seen, [`coordinate:${CWD}`]);
+	assert.deepEqual(calls, [{ args: ["sync", "-q"], cwd: CWD }]);
+	assert.deepEqual(result, { action: "sync", ok: true });
+});
+
+test("S2: while another session syncs, this one leaves the run to it and says so", async () => {
+	const calls: Calls = [];
+	const announced: string[] = [];
+	const result = await autoIndex({
+		cwd: CWD, env: {}, reason: "startup", exists: withFiles(".codegraph"),
+		onStart: (action) => announced.push(action),
+		sync: { request: async () => ({ status: "coalesced" as const }) },
+		run: fakeRun(calls),
+	});
+	assert.deepEqual(calls, [], "this session ran nothing: the other session syncs");
+	assert.deepEqual(announced, ["sync"]);
+	assert.deepEqual(result, { action: "sync", ok: true, coalesced: true });
+});
+
+test("S2: a coalesced startup sync still reports the failure the runner hit", async () => {
+	const result = await autoIndex({
+		cwd: CWD, env: {}, reason: "startup", exists: withFiles(".codegraph"),
+		// The coordinator ran the sync in this process and it failed.
+		sync: runsHere(),
+		run: fakeRun([], false),
+	});
+	assert.deepEqual(result, { action: "sync", ok: false });
+});
+
+test("S2: a startup sync that is still waiting for the index is reported as queued, not as a failure", async () => {
+	const calls: Calls = [];
+	const result = await autoIndex({
+		cwd: CWD, env: {}, reason: "startup", exists: withFiles(".codegraph"),
+		sync: { request: async () => ({ status: "queued" as const }) },
+		run: fakeRun(calls),
+	});
+	assert.deepEqual(calls, []);
+	assert.deepEqual(result, { action: "sync", ok: true, queued: true });
+});
+
+test("S2: unusable sync coordination starts no sync and is reported as such (fail closed)", async () => {
+	const calls: Calls = [];
+	const result = await autoIndex({
+		cwd: CWD, env: {}, reason: "startup", exists: withFiles(".codegraph"),
+		sync: { request: async () => ({ status: "unavailable" as const }) },
+		run: fakeRun(calls),
+	});
+	assert.deepEqual(calls, []);
+	assert.deepEqual(result, { action: "sync", ok: false, unavailable: true });
+});
+
+test("S2: a startup sync during another session's sync is coalesced, not skipped as if an init ran", async () => {
+	const log: string[] = [];
+	const calls: Calls = [];
+	const result = await autoIndex({
+		cwd: CWD, env: {}, reason: "startup", exists: withFiles(".codegraph"),
+		lock: { ...fakeLock(log, true), isInitRunning: () => false },
+		sync: { request: async () => { log.push("coordinate"); return { status: "coalesced" as const }; } },
+		run: fakeRun(calls),
+	});
+	assert.deepEqual(log, ["lock:isHeld", "coordinate"], "the index is locked by a sync, so this request is coalesced");
+	assert.deepEqual(result, { action: "sync", ok: true, coalesced: true });
+});
+
+test("S17: with an init running, startup does not even ask for a coordinated sync", async () => {
+	const calls: Calls = [];
+	let asked = false;
+	const result = await autoIndex({
+		cwd: CWD, env: {}, reason: "startup", exists: withFiles(".codegraph"),
+		lock: { ...fakeLock([], true), isInitRunning: () => true },
+		sync: { request: async () => { asked = true; return { status: "coalesced" as const }; } },
+		run: fakeRun(calls),
+	});
+	assert.equal(asked, false);
+	assert.deepEqual(calls, []);
+	assert.deepEqual(result, { action: "sync", ok: true, joined: true });
+});
+
+test("A5: a coordinated startup sync holds the index lock as a sync while it runs", async () => {
+	const log: string[] = [];
+	const lock = {
+		acquire: (_project: string, options?: { kind?: string }) => {
+			log.push(`lock:acquire:${options?.kind}`);
+			return {
+				status: "acquired" as const,
+				adopt: (pid: number) => log.push(`lock:adopt:${pid}`),
+				release: () => log.push("lock:release"),
+			};
+		},
+		isHeld: () => false,
+		isInitRunning: () => false,
+	};
+	const result = await autoIndex({
+		cwd: CWD, env: {}, reason: "startup", exists: withFiles(".codegraph"), lock,
+		sync: runsHere(),
+		run: async (args, cwd, timeoutMs, onSpawn) => { log.push(`run:${args[0]}`); onSpawn?.(4242); return true; },
+	});
+	assert.deepEqual(log, ["lock:acquire:sync", "run:sync", "lock:adopt:4242", "lock:release"]);
+	assert.deepEqual(result, { action: "sync", ok: true });
+});
+
+test("S1: an init never goes through the sync coordinator", async () => {
+	const calls: Calls = [];
+	let asked = false;
+	await autoIndex({
+		cwd: CWD, env: {}, reason: "startup", exists: withFiles(".git", "package.json"),
+		sync: { request: async () => { asked = true; return { status: "coalesced" as const }; } },
+		run: fakeRun(calls),
+	});
+	assert.equal(asked, false);
+	assert.deepEqual(calls.map((call) => call.args), [["init", "-y"]]);
+});
+
 // --- Real CodeGraph CLI: the promises, observed on disk and through the CLI. ---
 
 const hasCommand = (command: string) => spawnSync(command, ["--version"], { shell: true, stdio: "ignore" }).status === 0;

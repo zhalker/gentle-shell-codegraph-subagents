@@ -124,6 +124,55 @@ test("S14: a warm-up that fails or throws is reported as failed and never reject
 	}
 });
 
+test("S2: a startup sync that coalesced into another session's run still warms, because the index exists", async () => {
+	const log: string[] = [];
+	const result = await prepareProject({
+		cwd: CWD, env: {}, reason: "startup", exists: has(".codegraph"),
+		sync: { request: async () => ({ status: "coalesced" as const }) },
+		run: async (args) => { log.push(`run:${args[0]}`); return true; },
+		onIndexed: (index) => log.push(`indexed:${index.action}:${index.ok}`),
+		onWarmStart: () => log.push("warm-start"),
+		warm: async () => { log.push("warm"); return true; },
+	});
+	assert.deepEqual(log, ["indexed:sync:true", "warm-start", "warm"]);
+	assert.deepEqual(result, { index: { action: "sync", ok: true, coalesced: true }, warm: "ok" });
+});
+
+test("S2: a startup sync still queued for the index warms too, and is not reported as a failure", async () => {
+	const log: string[] = [];
+	const result = await prepareProject({
+		cwd: CWD, env: {}, reason: "startup", exists: has(".codegraph"),
+		sync: { request: async () => ({ status: "queued" as const }) },
+		run: async (args) => { log.push(`run:${args[0]}`); return true; },
+		onIndexed: (index) => log.push(`indexed:${index.action}:${index.ok}`),
+		warm: async () => { log.push("warm"); return true; },
+	});
+	assert.deepEqual(log, ["indexed:sync:true", "warm"]);
+	assert.deepEqual(result, { index: { action: "sync", ok: true, queued: true }, warm: "ok" });
+});
+
+test("S2: unusable sync coordination warms anyway, because the index is there", async () => {
+	const log: string[] = [];
+	const result = await prepareProject({
+		cwd: CWD, env: {}, reason: "startup", exists: has(".codegraph"),
+		sync: { request: async () => ({ status: "unavailable" as const }) },
+		run: async (args) => { log.push(`run:${args[0]}`); return true; },
+		onIndexed: (index) => log.push(`indexed:${index.action}:${index.ok}:${index.unavailable}`),
+		warm: async () => { log.push("warm"); return true; },
+	});
+	assert.deepEqual(log, ["indexed:sync:false:true", "warm"]);
+	assert.deepEqual(result, { index: { action: "sync", ok: false, unavailable: true }, warm: "ok" });
+});
+
+test("S1: an init is never handed to the sync coordinator", async () => {
+	const { log, input } = setup({ present: [".git", "package.json"] });
+	let asked = false;
+	const result = await prepareProject({ ...input, sync: { request: async () => { asked = true; return { status: "coalesced" as const }; } } });
+	assert.equal(asked, false);
+	assert.deepEqual(log, ["start:init", "run:init", "indexed:init:true", "warm-start", `warm:${CWD}`]);
+	assert.equal(result.index.ok, true);
+});
+
 test("S14: startup, new, resume and fork warm", async () => {
 	for (const reason of ["startup", "new", "resume", "fork"] as const) {
 		const { log, input } = setup({ present: [".codegraph"], reason });

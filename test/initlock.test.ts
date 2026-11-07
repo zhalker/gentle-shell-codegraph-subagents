@@ -4,7 +4,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpath
 import { spawn } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { LOCK_MAX_AGE_MS, PROXY_TRUST_MS, isInitLocked, tryAcquireInitLock } from "../src/initlock.ts";
+import { LOCK_MAX_AGE_MS, PROXY_TRUST_MS, isInitLocked, isInitRunning, tryAcquireInitLock } from "../src/initlock.ts";
 
 function scratch(): { dir: string; project: string } {
 	return {
@@ -303,6 +303,40 @@ test("S18: right after a shell spawned the init, before CodeGraph writes its own
 	assert.equal(taken.status, "acquired");
 	if (taken.status === "acquired") taken.release();
 	held.release();
+});
+
+test("A5: a sync holder locks the index for an init but is not an init running, so the explorer may still prefetch", () => {
+	const { dir, project } = scratch();
+	const sync = tryAcquireInitLock(project, { dir }, "sync");
+	assert.equal(sync.status, "acquired");
+	assert.equal(isInitLocked(project, { dir }), true, "the index is being written by this package");
+	assert.equal(isInitRunning(project, { dir }), false, "a sync is not an init: the prefetch is not skipped for it");
+	assert.deepEqual(tryAcquireInitLock(project, { dir }, "init"), { status: "busy" }, "an init cannot start while the sync runs");
+	assert.deepEqual(tryAcquireInitLock(project, { dir }, "sync"), { status: "busy" }, "nor a second sync");
+	if (sync.status === "acquired") sync.release();
+	assert.equal(isInitLocked(project, { dir }), false);
+	assert.equal(isInitRunning(project, { dir }), false);
+});
+
+test("A5: an init holder is both locked and an init running", () => {
+	const { dir, project } = scratch();
+	const init = tryAcquireInitLock(project, { dir });
+	assert.equal(init.status, "acquired");
+	assert.equal(isInitLocked(project, { dir }), true);
+	assert.equal(isInitRunning(project, { dir }), true);
+	assert.deepEqual(tryAcquireInitLock(project, { dir }, "sync"), { status: "busy" }, "a sync cannot start while the init runs");
+	if (init.status === "acquired") init.release();
+});
+
+test("A5: the kind of a holder survives adopting the process it started", () => {
+	const { dir, project } = scratch();
+	const sync = tryAcquireInitLock(project, { dir }, "sync");
+	assert.equal(sync.status, "acquired");
+	if (sync.status !== "acquired") return;
+	sync.adopt(424242);
+	assert.equal(isInitLocked(project, { dir }), true);
+	assert.equal(isInitRunning(project, { dir }), false);
+	sync.release();
 });
 
 const waitUntilGone = async (pid: number, deadlineMs: number): Promise<boolean> => {
