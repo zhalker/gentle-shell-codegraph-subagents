@@ -26,8 +26,20 @@ Pi's default MCP exposure is `codemode`: server tools are callable from scripts 
 
 ## Quirks
 
-- `- "*": false` is the fifth line of the `tools` list in the gentle-pi package agent files (`assets/agents/jd-judge-a.md`, `jd-judge-b.md`, `review-*`). Pi reads it as a tool called `*": false`. Probably only a warning; not verified.
+- `- "*": false` is the fifth line of the `tools` list in the gentle-pi package agent files (`assets/agents/jd-judge-a.md`, `jd-judge-b.md`, `review-*`). Still shipped in gentle-pi 4.7.0 and on gentle-shell `main` (checked 2026-11-08). gentle-pi filters it as a non-name entry (`extensions/gentle-agents.ts:360-367`, `TOOL_NAME = /^[A-Za-z0-9_.:-]+$/`); it has no deny-all meaning there, so removing it changes no tool list.
 - The global `jd-judge-a/b` files carry it flattened as `tools: *": false, read, grep, find, bash, mcp`.
+
+## Upstream state on 2026-11-08 (gentle-pi 4.7.0, gentle-ai 4.4.0 and `main`)
+
+- The marker blocks are still written: `pi_codegraph.go` on gentle-ai `main` defines the three markers (lines 27-29) and appends them in `ReconcilePiCodeGraph`; its last change is 2026-11-06. The gentle-pi package files never contain them.
+- gentle-pi 4.7.0 ships `mcp__codegraph__codegraph_explore` in the same six agents this extension adds it to (explore, verify, worker, jd-fix-agent, jd-judge-a, jd-judge-b), so the addition is a no-op there and still matters for older versions.
+- Subagents run from `~/.pi/agent/agents`, `~/.pi/agent/subagents`, `<cwd>/.pi/agents` and `<cwd>/.pi/subagents`, later directory winning (`lib/agents-config.ts:207-221`); the package's `assets/agents` is not read at launch. At every `session_start` gentle-pi copies `assets/agents` into `~/.pi/agent/agents` (`lib/agent-assets.ts:605-633`, called from `extensions/gentle-ai.ts:12487`), but skips a file whose content does not match its hash in `~/.pi/agent/gentle-ai/managed-assets.json` unless its body is a known shipped body (`lib/agent-assets.ts:497-525`).
+- On this machine `managed-assets.json` lists none of the ten agent files, and the files in `~/.pi/agent/agents` are older than 4.7.0 (the explorer lacks the web tools and has the earlier description). The `.pre-codegraph-subagents.bak` copies already carried the gentle-ai markers and model routing before this extension rewrote them. An isolated upgrade (install gentle-pi 4.6.0 into a scratch `GENTLE_PI_AGENT_HOME`, edit the ten agent files, then run the 4.7.0 `installPackageAssets(cwd, true, ["delegation", "review"])` that `session_start` runs) showed on 2026-11-08:
+  - no edit: 10 of 10 upgraded to 4.7.0 and stay managed (control);
+  - this extension's `normalizeAgent`: 8 of 10 kept their 4.6.0 content (only verify and jd-fix-agent upgraded);
+  - a gentle-ai marker block appended: 10 of 10 kept 4.6.0 and left `managed-assets.json`;
+  - one `model:` line added to the frontmatter: 10 of 10 not upgraded to 4.7.0.
+  So any local edit, this extension's included, freezes an agent file at the version it had; once a file is out of `managed-assets.json`, later sessions skip it even when it is a pristine 4.7.0 file with one extra frontmatter line.
 
 ## Open questions for the implementation
 

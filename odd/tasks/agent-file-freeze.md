@@ -1,0 +1,29 @@
+# agent-file-freeze
+Stop this extension from freezing gentle-pi agent files: any edit to `~/.pi/agent/agents/*.md` makes gentle-pi stop refreshing them on upgrades.
+Evidence: `docs/findings.md`, section "Upstream state on 2026-11-08". Engram mirror: `odd/agent-file-freeze/tasks`.
+
+## Specs
+
+- S1. "No podemos hacer cambios solo con suposiciones o hipotesis. hay que obtener evidencia"
+- S2. Explorer tools, answer to "¿Qué hacemos ahora?": "Dejarle las dos (recomendado)" — "No se edita el archivo y gentle-pi lo sigue actualizando solo."
+- S3. Approved plan step 1: "La extensión deja de editar los archivos de agentes que no tienen bloques de `gentle-ai`. Así gentle-pi los vuelve a actualizar solo."
+- S4. Approved plan step 2: "Si un archivo tiene bloques de `gentle-ai`, se siguen sacando. Ese archivo ya está congelado, así que no se pierde nada."
+- S5. Approved plan step 3: "La marca del worker se reemplaza por una detección al lanzar el subagente, sin tocar el archivo. Antes de cambiar nada pruebo que la detección funcione. Si no funciona, te lo traigo como decisión."
+- S6. Approved plan step 4: "La configuración de `mcp.json` (`toolExposure` en `direct`) queda igual. No congela nada."
+- S7. Approved plan step 5: "Después, por separado, recuperamos tus agentes actuales con copia de seguridad, como te expliqué antes." Models, answer to "¿Las pusiste vos a propósito?": "Sí, quiero conservar esos modelos" — "Cuando recuperemos los agentes, los vuelvo a configurar desde la configuración de gentle-pi."
+
+## Tasks
+
+- [x] T1 | S1 S3 S4 S5 | explore | commit: (this file's first commit) | Evidence only, no code change: how a child can tell it is `gentle-ai-worker` without a marker in its file; which signal says a file is already frozen (gentle-ai blocks or its absence from `managed-assets.json`).
+- [ ] T2 | S1-S6 | worker | commit: - | Test-first: normalizer leaves files that are not frozen untouched; frozen files keep losing gentle-ai blocks; explorer keeps `codegraph`; worker reminder no longer needs the file marker; docs and README updated.
+- [ ] T3 | S7 | inline | commit: - | Separate, needs explicit approval of the exact operation: restore the user's agents to gentle-pi 4.7.0 with backups, keep the user's models through gentle-pi's model configuration, and prove gentle-pi manages them again.
+
+## Log
+
+- L1. "me avisaron de otra cosa, comprueba si es verdad y dime que recomiendas: ... estos textos ya no son parte de los archivos md de los agentes: \"*\": false ... <!-- gentle-ai:pi-codegraph-tool --> / <!-- gentle-ai:pi-codegraph-guidance --> y <!-- /gentle-ai:pi-codegraph --> Además, al gentle-ai-explorer se le agregó en las tools: mcpcodegraphcodegraph_explore"
+- L2. "realiza ambas, cosas. No podemos hacer cambios solo con suposiciones o hipotesis. hay que obtener evidencia"
+- L3. "aprobada tu recomendacion" (isolated upgrade experiment; result in `docs/findings.md`).
+- L4. "1 aprobado" (review which normalizer edits are still needed against 4.7.0). Result: only the gentle-ai block removal (when present) and the worker marker remain needed; `codegraph` is registered in children by gentle-pi 4.7.0 `extensions/child-context.ts:15-18`.
+- L5. Answers: explorer "Dejarle las dos (recomendado)"; models "Sí, quiero conservar esos modelos"; plan "Sí, adelante".
+- L6. T1 evidence. Worker: gentle-pi 4.7.0 passes an agent body over 1000 bytes as a file in `<tmpdir>/gentle-pi-subagent-<agent name>-<random>/instructions.md` with `--append-system-prompt` (`lib/agents-runner.ts:706-714`, `:358-360`); no environment variable carries the agent name. A live `gentle-ai-worker` child showed `--append-system-prompt C:\Users\Tony\AppData\Local\Temp\gpHCf3HX\gentle-pi-subagent-gentle-ai-worker-DZgR2G\instructions.md` in its own command line, with `GENTLE_PI_AGENTS_CHILD=1`. The worker body is 14,785 bytes in 4.7.0 (14,135 in the user's copy), so it always takes the file route. Frozen files: a file whose content differs from its `managed-assets.json` hash is dropped from the manifest at the next `session_start` force install and never refreshed again unless its body is a shipped one (`lib/agent-assets.ts:476-536`); gentle-ai marker blocks therefore always mean frozen. S3's criterion (gentle-ai blocks present) is kept; reading the manifest was considered and not needed.
+- L7. T2 design from L4-L6: files without gentle-ai blocks are left byte-for-byte untouched; files with blocks lose the blocks and get the tool fixes (dead `mcp` and `"*": false` removed, `mcp__codegraph__codegraph_explore` added to the six agents), but the explorer keeps `codegraph` and its shipped instruction lines (S2); no worker marker is appended; the worker reminder fires for a child whose argv names `gentle-pi-subagent-gentle-ai-worker-`, or whose system prompt still carries the old marker.
