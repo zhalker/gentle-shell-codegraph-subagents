@@ -1,0 +1,5 @@
+{
+  "jd-judge-a": { "model": "fixture/judge-model", "thinking": "high" },
+  "gentle-ai-verify": { "model": "fixture/verify-model", "thinking": "high" },
+  "gentle-ai-worker": { "model": "fixture/worker-model", "thinking": "high" }
+}
