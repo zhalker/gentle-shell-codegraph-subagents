@@ -14,6 +14,9 @@ Use CodeGraph before broad filesystem searches.
 8. Only fall back to normal filesystem tools after CodeGraph initialization or use fails.
 <!-- /gentle-ai:pi-codegraph -->`;
 
+// The blocks gentle-ai left in the file, which is what tells a frozen file apart.
+const BLOCKS = `\n\n${TOOL_BLOCK}\n\n${GUIDANCE_BLOCK}`;
+
 function agent(name: string, toolsLines: string, body: string): string {
 	return `---\nname: ${name}\ndescription: test agent\n${toolsLines}\n---\n\n${body}\n`;
 }
@@ -42,9 +45,15 @@ test("S1: removes both gentle-ai CodeGraph blocks and leaves the rest of the bod
 	assert.ok(output.endsWith("You verify.\n"), `body kept and ends with one newline, got ${JSON.stringify(output.slice(-30))}`);
 });
 
-test("S1: an agent without gentle-ai blocks keeps its body byte for byte", () => {
-	const input = agent("gentle-ai-verify", "tools: read, grep, find, bash", "You verify.\n\nNothing about the graph here.");
-	assert.equal(normalizeAgent(input).split("---")[2], input.split("---")[2]);
+test("S3: a file without gentle-ai marker blocks is returned byte for byte, so gentle-pi keeps updating it", () => {
+	const cases: Record<string, string> = {
+		worker: agent("gentle-ai-worker", "tools: read, bash", "Worker instructions."),
+		explorer: agent("gentle-ai-explore", "tools: read, grep, find, codegraph", "You explore."),
+		judge: agent("jd-judge-a", 'tools: *": false, read, grep, find, bash, mcp', "You judge."),
+		withoutMcpTool: agent("gentle-ai-verify", "tools: read, grep, find, bash", "You verify.\n\nNothing about the graph here."),
+		crlf: `---\r\nname: gentle-ai-verify\r\ndescription: x\r\ntools: read, mcp\r\n---\r\n\r\nYou verify.\r\n`,
+	};
+	for (const [label, input] of Object.entries(cases)) assert.equal(normalizeAgent(input), input, label);
 });
 
 test("S1: a block in the middle of the body is removed without gluing the neighbours", () => {
@@ -53,71 +62,74 @@ test("S1: a block in the middle of the body is removed without gluing the neighb
 	assert.ok(output.includes("Before.\n\nAfter."), JSON.stringify(output));
 });
 
-test("S2: the explorer loses its codegraph extension tool and gets the MCP tool", () => {
-	const input = agent("gentle-ai-explore", "tools:\n  - read\n  - grep\n  - find\n  - codegraph", "You explore.");
-	assert.deepEqual(toolsOf(normalizeAgent(input)), ["read", "grep", "find", CODEGRAPH_MCP_TOOL]);
+test("S2: a frozen explorer keeps its codegraph tool, gains the MCP tool, and keeps its own instruction lines", () => {
+	const input = agent("gentle-ai-explore", "tools:\n  - read\n  - grep\n  - find\n  - codegraph", `You explore.\n${EXPLORER_BODY}${BLOCKS}`);
+	const output = normalizeAgent(input);
+	const tools = toolsOf(output);
+	assert.ok(tools.includes("codegraph"), `keeps the extension tool, got ${JSON.stringify(tools)}`);
+	assert.ok(tools.includes(CODEGRAPH_MCP_TOOL), `gets the MCP tool, got ${JSON.stringify(tools)}`);
+	for (const line of EXPLORER_BODY.split("\n").filter(Boolean)) assert.ok(output.includes(line), line);
+	assert.ok(!output.includes("gentle-ai:pi-codegraph"), "blocks gone");
 });
 
-test("skill workflow: only gentle-ai-worker receives a stable routing marker", () => {
-	const input = agent("gentle-ai-worker", "tools: read, bash", "Worker instructions.");
-	const output = normalizeAgent(input);
-	assert.ok(output.includes("<!-- codegraph-workflow:worker -->"));
-	assert.equal(normalizeAgent(output), output);
-	for (const name of ["gentle-ai-explore", "gentle-ai-verify", "jd-fix-agent"]) {
-		assert.ok(!normalizeAgent(agent(name, "tools: read", "Instructions.")).includes("<!-- codegraph-workflow:worker -->"));
-	}
+test("S5: no worker marker is appended to the file", () => {
+	const untouched = agent("gentle-ai-worker", "tools: read, bash", "Worker instructions.");
+	assert.equal(normalizeAgent(untouched), untouched);
+	const output = normalizeAgent(agent("gentle-ai-worker", "tools: read, bash", `Worker instructions.${BLOCKS}`));
+	assert.ok(!output.includes("<!-- codegraph-workflow:worker -->"), output);
+	assert.ok(!output.includes("gentle-ai:pi-codegraph"), output);
 });
 
 test("S2: other agents keep a codegraph tool they declare", () => {
-	const input = agent("gentle-ai-worker", "tools: read, codegraph, bash", "You work.");
+	const input = agent("gentle-ai-worker", "tools: read, codegraph, bash", `You work.${BLOCKS}`);
 	assert.deepEqual(toolsOf(normalizeAgent(input)), ["read", "codegraph", "bash", CODEGRAPH_MCP_TOOL]);
 });
 
 test("S3: verify, worker, fix agent and both judges receive the MCP tool", () => {
 	for (const name of ["gentle-ai-verify", "gentle-ai-worker", "jd-fix-agent", "jd-judge-a", "jd-judge-b"]) {
-		const out = normalizeAgent(agent(name, "tools: read, grep, find, bash", "Body."));
+		const out = normalizeAgent(agent(name, "tools: read, grep, find, bash", `Body.${BLOCKS}`));
 		assert.ok(toolsOf(out).includes(CODEGRAPH_MCP_TOOL), `${name} should have the MCP tool`);
 	}
 });
 
 test("S3: the MCP tool is never listed twice", () => {
-	const input = agent("jd-judge-a", `tools: read, ${CODEGRAPH_MCP_TOOL}, bash`, "Body.");
+	const input = agent("jd-judge-a", `tools: read, ${CODEGRAPH_MCP_TOOL}, bash`, `Body.${BLOCKS}`);
 	assert.equal(toolsOf(normalizeAgent(input)).filter((t) => t === CODEGRAPH_MCP_TOOL).length, 1);
 });
 
 test("S4: the dead mcp entry is removed from the inline, bracket and list forms", () => {
-	assert.deepEqual(toolsOf(normalizeAgent(agent("gentle-ai-verify", "tools: read, bash, mcp", "B."))), ["read", "bash", CODEGRAPH_MCP_TOOL]);
-	assert.deepEqual(toolsOf(normalizeAgent(agent("gentle-ai-verify", "tools: [read, bash, mcp]", "B."))), ["read", "bash", CODEGRAPH_MCP_TOOL]);
-	assert.deepEqual(toolsOf(normalizeAgent(agent("gentle-ai-verify", "tools:\n  - read\n  - mcp\n  - bash", "B."))), ["read", "bash", CODEGRAPH_MCP_TOOL]);
+	assert.deepEqual(toolsOf(normalizeAgent(agent("gentle-ai-verify", "tools: read, bash, mcp", `B.${BLOCKS}`))), ["read", "bash", CODEGRAPH_MCP_TOOL]);
+	assert.deepEqual(toolsOf(normalizeAgent(agent("gentle-ai-verify", "tools: [read, bash, mcp]", `B.${BLOCKS}`))), ["read", "bash", CODEGRAPH_MCP_TOOL]);
+	assert.deepEqual(toolsOf(normalizeAgent(agent("gentle-ai-verify", "tools:\n  - read\n  - mcp\n  - bash", `B.${BLOCKS}`))), ["read", "bash", CODEGRAPH_MCP_TOOL]);
 });
 
 test('S4: the broken `*": false` entry is removed in the flattened and list forms', () => {
-	const flat = normalizeAgent(agent("jd-judge-a", 'tools: *": false, read, grep, find, bash, mcp', "B."));
+	const flat = normalizeAgent(agent("jd-judge-a", 'tools: *": false, read, grep, find, bash, mcp', `B.${BLOCKS}`));
 	assert.deepEqual(toolsOf(flat), ["read", "grep", "find", "bash", CODEGRAPH_MCP_TOOL]);
-	const list = normalizeAgent(agent("jd-judge-b", 'tools:\n  - "*": false\n  - read\n  - bash', "B."));
+	const list = normalizeAgent(agent("jd-judge-b", 'tools:\n  - "*": false\n  - read\n  - bash', `B.${BLOCKS}`));
 	assert.deepEqual(toolsOf(list), ["read", "bash", CODEGRAPH_MCP_TOOL]);
 });
 
 test("S5: review agents never receive the MCP tool but lose the blocks and the dead mcp entry", () => {
 	for (const name of ["review-readability", "review-reliability", "review-resilience", "review-risk"]) {
-		const input = agent(name, "tools:\n  - read\n  - grep\n  - gentle_review_scope\n  - mcp", `You review.\n\n${GUIDANCE_BLOCK}`);
+		const input = agent(name, "tools:\n  - read\n  - grep\n  - gentle_review_scope\n  - mcp", `You review.${BLOCKS}`);
 		const output = normalizeAgent(input);
 		assert.deepEqual(toolsOf(output), ["read", "grep", "gentle_review_scope"], name);
 		assert.ok(!output.includes("gentle-ai:pi-codegraph"), name);
 	}
 });
 
-test("a worker with no tools key keeps Pi's defaults and receives the reminder marker", () => {
-	const input = `---\nname: gentle-ai-worker\ndescription: x\n---\n\nBody.\n`;
+test("a frozen worker with no tools key keeps Pi's defaults", () => {
+	const input = `---\nname: gentle-ai-worker\ndescription: x\n---\n\nBody.${BLOCKS}\n`;
 	const output = normalizeAgent(input);
 	assert.ok(!/^tools:/m.test(output));
 	assert.ok(output.includes("Body."));
-	assert.ok(output.includes("<!-- codegraph-workflow:worker -->"));
+	assert.ok(!output.includes("gentle-ai:pi-codegraph"));
 	assert.equal(normalizeAgent(output), output);
 });
 
 test("S7: normalizing twice changes nothing", () => {
-	const input = agent("gentle-ai-explore", "tools:\n  - read\n  - codegraph\n  - mcp", `Body.\n\n${TOOL_BLOCK}\n\n${GUIDANCE_BLOCK}`);
+	const input = agent("gentle-ai-explore", "tools:\n  - read\n  - codegraph\n  - mcp", `Body.${BLOCKS}`);
 	const once = normalizeAgent(input);
 	assert.equal(normalizeAgent(once), once);
 });
@@ -126,8 +138,8 @@ test("text that is not an agent definition is returned unchanged", () => {
 	assert.equal(normalizeAgent("no frontmatter here\n"), "no frontmatter here\n");
 });
 
-test("an agent whose only tool is the dead mcp entry is not widened to Pi's defaults", () => {
-	const input = agent("review-risk", "tools: mcp", "Body.");
+test("a frozen agent whose only tool is the dead mcp entry is not widened to Pi's defaults", () => {
+	const input = agent("review-risk", "tools: mcp", `Body.${BLOCKS}`);
 	assert.deepEqual(toolsOf(normalizeAgent(input)), ["mcp"]);
 });
 
@@ -141,30 +153,8 @@ const EXPLORER_BODY = [
 	"- Do not fix findings, delegate to child agents, commit, or push.",
 ].join("\n");
 
-test("S9: the explorer's own CodeGraph instructions point at the MCP tool instead of the removed codegraph tool", () => {
-	const input = agent("gentle-ai-explore", "tools: read, codegraph", EXPLORER_BODY);
-	const output = normalizeAgent(input);
-	assert.ok(output.includes(`- For structural questions, use the \`${CODEGRAPH_MCP_TOOL}\` tool before broad filesystem searches.`), output);
-	assert.ok(!output.includes('operation: "init"'));
-	assert.ok(!output.includes("cwd-scoped"));
-	assert.ok(!output.includes("may create or update only the current workspace"));
-	assert.ok(output.includes("- Read and search only. Do not edit, write, run commands, or mutate state."));
-	assert.ok(output.includes("- If CodeGraph reports that it is unavailable or fails"), "fallback line kept");
-	assert.ok(output.includes("- Do not fix findings, delegate to child agents, commit, or push."), "unrelated lines kept");
-});
-
-test("S9: the package's own wording of the last bullet is handled too", () => {
-	const body = "- Other than the explicit `.codegraph/` index exception, read and search only. Do not edit, write, run commands, or mutate project state.";
-	const output = normalizeAgent(agent("gentle-ai-explore", "tools: read, codegraph", body));
-	assert.ok(output.includes("- Read and search only. Do not edit, write, run commands, or mutate project state."), output);
-});
-
-test("S9: other agents keep the same lines untouched", () => {
-	const input = agent("gentle-ai-worker", "tools: read, bash", EXPLORER_BODY);
-	assert.ok(normalizeAgent(input).includes("cwd-scoped `codegraph` tool"));
-});
-
-test("S9: rewriting the explorer instructions twice changes nothing", () => {
-	const once = normalizeAgent(agent("gentle-ai-explore", "tools: read, codegraph", EXPLORER_BODY));
-	assert.equal(normalizeAgent(once), once);
+test("S2: a frozen explorer keeps every shipped instruction line verbatim", () => {
+	const output = normalizeAgent(agent("gentle-ai-explore", "tools: read, grep, find, codegraph", `${EXPLORER_BODY}${BLOCKS}`));
+	for (const line of EXPLORER_BODY.split("\n").filter(Boolean)) assert.ok(output.includes(line), line);
+	assert.equal(normalizeAgent(output), output);
 });

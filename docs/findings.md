@@ -67,6 +67,15 @@ No package found that normalizes gentle-shell agent definitions and the MCP expo
 
 All 10 files change, are idempotent on a second pass, and end with the expected `tools:` (MCP tool on explore, verify, worker, jd-fix-agent and both judges; review-* untouched apart from the removed blocks). The explorer's own body (package-owned, outside the markers) said to use the cwd-scoped `codegraph` tool and `operation: "init"`, a tool it no longer has after S2. The owner asked to rewrite those lines (S9, T7, done).
 
+## Normalizer behavior decided on 2026-11-08 (T2) and implemented after it
+
+Supersedes the normalizer described in the dry run above; the evidence is L6 and the design L7 in `odd/tasks/agent-file-freeze.md`.
+
+- A file with no gentle-ai marker blocks is returned byte for byte (worker, explorer, a `"*": false` or `mcp` entry, a missing `mcp__codegraph__codegraph_explore`): the edit itself is what takes the file out of `managed-assets.json`.
+- A file that still carries the blocks is already frozen: it loses the blocks, the dead `mcp` entry and `"*": false`, and gains the MCP tool when its name is one of the six. The explorer keeps its `codegraph` extension tool and its shipped instruction lines (S2, which reverses the T7 rewrite), so the normalizer no longer matches the 2026-11-03 dry run.
+- No worker marker is appended to any file. A worker child is recognised from its own command line: gentle-pi passes an agent body over 1000 bytes as `<tmpdir>/gentle-pi-subagent-<agent>-<random>/instructions.md` after `--append-system-prompt`, so a directory named `gentle-pi-subagent-gentle-ai-worker-` in its argv identifies it, and a system prompt still carrying `<!-- codegraph-workflow:worker -->` (a file edited before this change) counts too. No environment variable carries the agent name (`src/prefetch.ts`).
+- The `mcp.json` normalization is unchanged.
+
 ## Network shares and the explorer prefetch (office trial 2026-11-04/05, ported 2026-11-05)
 
 Observed on Windows with projects on SMB mapped drives; the trial notes and measurements are outside this repository. The specs of the port live in `odd/tasks/office-patch-port.md`.

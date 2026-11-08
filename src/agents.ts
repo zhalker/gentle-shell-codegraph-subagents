@@ -1,8 +1,5 @@
-import { WORKER_MARKER } from "./skill-reminder.ts";
-
 export const CODEGRAPH_MCP_TOOL = "mcp__codegraph__codegraph_explore";
 
-const EXPLORER = "gentle-ai-explore";
 const AGENTS_WITH_MCP_TOOL = new Set([
 	"gentle-ai-explore",
 	"gentle-ai-verify",
@@ -13,7 +10,10 @@ const AGENTS_WITH_MCP_TOOL = new Set([
 ]);
 
 const FRONTMATTER = /^(---\r?\n)([\s\S]*?)(\r?\n---)([\s\S]*)$/;
-const GENTLE_AI_BLOCK = /<!-- gentle-ai:pi-codegraph-(?:tool|guidance) -->[\s\S]*?<!-- \/gentle-ai:pi-codegraph -->/g;
+const BLOCK_PATTERN = "<!-- gentle-ai:pi-codegraph-(?:tool|guidance) -->[\\s\\S]*?<!-- \\/gentle-ai:pi-codegraph -->";
+const GENTLE_AI_BLOCK = new RegExp(BLOCK_PATTERN, "g");
+// The markers make gentle-ai's blocks visible without depending on the rest of the file.
+const HAS_GENTLE_AI_BLOCK = new RegExp(BLOCK_PATTERN);
 const MARKER = "\u0000";
 
 function unquote(value: string): string {
@@ -24,26 +24,6 @@ function unquote(value: string): string {
 // The gentle-pi agent files ship a `- "*": false` list entry; Pi reads it as a tool named `*": false`.
 function isBrokenEntry(item: string): boolean {
 	return /\*["']?\s*:\s*false/.test(item);
-}
-
-const EXPLORER_STRUCTURAL_LINE = "- For structural questions, use the cwd-scoped `codegraph` tool";
-const EXPLORER_INDEX_LINE = "- `codegraph` may create or update only the current workspace `.codegraph/` index";
-const EXPLORER_READ_ONLY_PHRASE = "Other than the explicit `.codegraph/` index exception, read and search only.";
-
-// The explorer loses its `codegraph` extension tool, so the lines that tell it to use or initialize that tool would send it nowhere.
-function rewriteExplorerInstructions(body: string, eol: string): string {
-	if (!body.includes("codegraph")) return body;
-	const out: string[] = [];
-	for (const line of body.split(eol)) {
-		if (line.startsWith(EXPLORER_STRUCTURAL_LINE)) {
-			out.push(`- For structural questions, use the \`${CODEGRAPH_MCP_TOOL}\` tool before broad filesystem searches. It reads the existing \`.codegraph/\` index and cannot create one; when the project has none, use \`read\`, \`grep\`, and \`find\` and say so in the handoff.`);
-		} else if (line.startsWith(EXPLORER_INDEX_LINE)) {
-			continue;
-		} else {
-			out.push(line.replace(EXPLORER_READ_ONLY_PHRASE, "Read and search only."));
-		}
-	}
-	return out.join(eol);
 }
 
 function removeBlocks(body: string, eol: string): string {
@@ -88,7 +68,6 @@ function editTools(front: string, eol: string): string {
 	if (items.length === 0) return front;
 
 	let next = items.filter((item) => unquote(item) !== "mcp" && !isBrokenEntry(item));
-	if (name === EXPLORER) next = next.filter((item) => unquote(item) !== "codegraph");
 	if (AGENTS_WITH_MCP_TOOL.has(name) && !next.some((item) => unquote(item) === CODEGRAPH_MCP_TOOL)) next.push(CODEGRAPH_MCP_TOOL);
 	// An empty list would hand the agent Pi's default tools; keep what was there instead.
 	if (next.length === 0 || next.join("\n") === items.join("\n")) return front;
@@ -100,17 +79,16 @@ function editTools(front: string, eol: string): string {
 	return [...lines.slice(0, at), ...replacement, ...lines.slice(at + consumed)].join(eol);
 }
 
-/** Returns the agent definition with the CodeGraph wiring applied; identical text when nothing changes. */
+/**
+ * Returns the agent definition with the CodeGraph wiring applied; identical text when nothing changes.
+ * A file with no gentle-ai marker blocks is left byte for byte: editing it makes gentle-pi stop
+ * refreshing that agent on upgrades, so it is only touched when gentle-ai already froze it.
+ */
 export function normalizeAgent(text: string): string {
+	if (!HAS_GENTLE_AI_BLOCK.test(text)) return text;
 	const match = FRONTMATTER.exec(text);
 	if (!match) return text;
 	const [, open, front, close, body] = match;
 	const eol = text.includes("\r\n") ? "\r\n" : "\n";
-	const name = /^name:\s*(.+)$/m.exec(front)?.[1];
-	const cleaned = removeBlocks(body, eol);
-	let rewritten = name !== undefined && unquote(name) === EXPLORER ? rewriteExplorerInstructions(cleaned, eol) : cleaned;
-	if (name !== undefined && unquote(name) === "gentle-ai-worker" && !rewritten.includes(WORKER_MARKER)) {
-		rewritten = rewritten.trimEnd() + eol + eol + WORKER_MARKER + eol;
-	}
-	return open + editTools(front, eol) + close + rewritten;
+	return open + editTools(front, eol) + close + removeBlocks(body, eol);
 }

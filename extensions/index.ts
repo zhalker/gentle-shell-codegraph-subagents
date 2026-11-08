@@ -110,6 +110,8 @@ export default function (pi: ExtensionAPI) {
 				skills: event.systemPromptOptions?.skills ?? [],
 				child,
 				systemPrompt: event.systemPrompt,
+				// A worker child is recognised by where gentle-pi put its body, not by a marker in its file.
+				argv: process.argv,
 				alreadySent,
 				isUserPrompt,
 			});
