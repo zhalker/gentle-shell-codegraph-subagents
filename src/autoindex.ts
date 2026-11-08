@@ -13,10 +13,37 @@ export const INIT_PROJECT_MARKERS = ["composer.json", "package.json", "pyproject
 export const SYNC_TIMEOUT_MS = 120_000;
 export const INIT_TIMEOUT_MS = 600_000;
 
-const CHILD_ENV = "GENTLE_PI_AGENTS_CHILD";
+/** The environment variable a subagent child carries; children never start an index operation of their own. */
+export const CHILD_ENV = "GENTLE_PI_AGENTS_CHILD";
 
 export type IndexAction = "sync" | "init" | "none";
 export type SessionStartReason = "startup" | "reload" | "new" | "resume" | "fork";
+
+/** What one coordinated sync did here, or why it did not run. */
+export type SyncRunOutcome =
+	/** The sync ran in this session. */
+	| { status: "ran"; ok: boolean }
+	/** Another session's run, which started after this request, completed: the demand was served. */
+	| { status: "coalesced" }
+	/** The index was locked (an init runs, or a process of this package still writes it) or this session waited too
+	 * long: nothing ran for the request yet, and it is still recorded on disk for the next sync. */
+	| { status: "queued" }
+	/** The coordination state could not be used, so no sync was started: failing closed beats two syncs at once. */
+	| { status: "unavailable" };
+
+/** Called with the process the sync started, so the coordination can tell a run that ended from one that went on. */
+export type SyncSpawn = (pid: number, options?: { proxy?: boolean }) => void;
+
+/** One attempt under the coordination: it ran the command, or the index was locked and nothing ran. */
+export type SyncAttemptResult = { ran: true; ok: boolean } | { ran: false };
+
+/**
+ * Keeps one extension-started sync per project at a time across the sessions of this user, and turns a request
+ * that arrives during another sync into a single follow-up of it. Absent in a unit test: no coordination.
+ */
+export interface SyncCoordinator {
+	request(project: string, attempt: (onSpawn: SyncSpawn) => Promise<SyncAttemptResult>): Promise<SyncRunOutcome>;
+}
 
 /** An existing index is synced; a fresh git project with a marker file is initialised; anything else is left alone. */
 export function planIndexAction(cwd: string, exists: (path: string) => boolean): IndexAction {
@@ -33,6 +60,8 @@ export interface AutoIndexInput {
 	exists(path: string): boolean;
 	/** One init per project across sessions; absent means no coordination (the unit tests). */
 	lock?: InitLock;
+	/** One sync per project at a time across sessions, with pending requests coalesced; absent means no coordination. */
+	sync?: SyncCoordinator;
 	/** Called right before the command starts, so the user can be told what is going on. */
 	onStart?(action: "sync" | "init"): void;
 	/** Whether CodeGraph is writing this index right now; defaults to {@link codegraphWritingIndex}. */
@@ -51,6 +80,12 @@ export interface AutoIndexResult {
 	ok: boolean;
 	/** Another session was already creating the index, so this one left it alone. */
 	joined?: boolean;
+	/** Another session was already syncing, so this one left the sync to it; its run completed. */
+	coalesced?: boolean;
+	/** The request is recorded on disk and still waiting for the index to be free; nothing ran yet. */
+	queued?: boolean;
+	/** The coordination state could not be used, so no sync was started here. */
+	unavailable?: boolean;
 }
 
 /** Brings the CodeGraph index of the project Pi started in up to date, or creates it. Never rejects. */
@@ -61,10 +96,16 @@ export async function autoIndex(input: AutoIndexInput): Promise<AutoIndexResult>
 		if (action === "none") return { action, ok: true };
 		const announce = () => { try { input.onStart?.(action); } catch { /* telling the user is never worth stopping the index */ } };
 		if (action === "sync") {
-			// Another session is creating the index: nothing may touch it meanwhile, a sync included.
-			if (input.lock?.isHeld(input.cwd)) return { action, ok: true, joined: true };
+			// An init holds the index: nothing may touch it meanwhile, and this session leaves it to that one.
+			// A sync holding it is different: the index exists, so this request is coalesced into it instead.
+			if (input.lock?.isHeld(input.cwd) && (input.lock.isInitRunning?.(input.cwd) ?? true)) return { action, ok: true, joined: true };
 			announce();
-			return { action, ok: await input.run(["sync", "-q"], input.cwd, SYNC_TIMEOUT_MS) };
+			if (input.sync === undefined) return { action, ok: await input.run(["sync", "-q"], input.cwd, SYNC_TIMEOUT_MS) };
+			const outcome = await input.sync.request(input.cwd, (onSpawn) => runSyncAttempt(input, onSpawn));
+			if (outcome.status === "ran") return { action, ok: outcome.ok };
+			if (outcome.status === "coalesced") return { action, ok: true, coalesced: true };
+			if (outcome.status === "queued") return { action, ok: true, queued: true };
+			return { action, ok: false, unavailable: true };
 		}
 		const attempt = input.lock?.acquire(input.cwd);
 		if (attempt?.status === "busy") return { action, ok: true, joined: true };
@@ -88,6 +129,31 @@ export async function autoIndex(input: AutoIndexInput): Promise<AutoIndexResult>
 		}
 	} catch {
 		return { action: planIndexAction(input.cwd, input.exists), ok: false };
+	}
+}
+
+/** What one coordinated sync attempt needs: the project, the package's index lock and the way to run the CLI. */
+export type SyncAttemptInput = Pick<AutoIndexInput, "cwd" | "lock" | "run">;
+
+/**
+ * One sync attempt under the coordination. It takes the package's index lock for the whole run, so an init can
+ * never begin in the middle of a sync: the lock is taken, not merely observed, which is what closes the window
+ * between deciding to sync and starting it. When an init (or any other writer of this package) holds the lock,
+ * nothing runs and the coordination keeps the request pending instead of dropping it. The process it starts is
+ * reported to `onSpawn`, so the coordination can tell a run that ended from one that outlived its session.
+ */
+export async function runSyncAttempt(input: SyncAttemptInput, onSpawn: SyncSpawn): Promise<SyncAttemptResult> {
+	const attempt = input.lock?.acquire(input.cwd, { kind: "sync" });
+	if (attempt?.status === "busy") return { ran: false };
+	const adopt = attempt?.status === "acquired" ? attempt.adopt : () => {};
+	try {
+		const ok = await input.run(["sync", "-q"], input.cwd, SYNC_TIMEOUT_MS, (pid, options) => {
+			try { adopt(pid, options); } catch { /* recording the pid is never worth failing the sync */ }
+			try { onSpawn(pid, options); } catch { /* the coordination record is never worth failing the sync */ }
+		});
+		return { ran: true, ok };
+	} finally {
+		attempt?.release();
 	}
 }
 

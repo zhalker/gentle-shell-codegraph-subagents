@@ -5,10 +5,12 @@ import { join } from "node:path";
 import { normalizeRoot } from "./daemonclient.ts";
 
 /**
- * One `codegraph init` per project at a time, across every Pi session of this user on the machine (the temp folder
- * is per user, so sessions of another Windows account are not seen). CodeGraph's own `init`
- * can hang for good when two start at the same instant, or when anything opens the database in the first
- * moments after the index was created, so the sessions that lose the race leave the index alone.
+ * One `codegraph` index writer per project at a time, across every Pi session of this user on the machine (the
+ * temp folder is per user, so sessions of another Windows account are not seen): an init that creates the index
+ * and a sync that updates it exclude each other, and a sync never starts inside the first moments after an index
+ * was created. CodeGraph's own `init` can hang for good when two start at the same instant, or when anything
+ * opens the database in the first moments after the index was created, so the sessions that lose the race leave
+ * the index alone.
  *
  * The lock is a directory in the temp folder (creating a directory is atomic) holding `owner.json`. Clearing a
  * stale lock happens under a second directory, `<lock>.takeover`, so only one session at a time can do it.
@@ -39,6 +41,13 @@ export interface LockOptions {
 	onStale?(): void;
 }
 
+/**
+ * Who writes the index while the lock is held: `init` creates it, `sync` updates an existing one. Both exclude
+ * each other, so a sync never starts inside an init (or the other way round); only an init makes the explorer
+ * skip its prefetch, because a sync of an existing index does not disturb a read.
+ */
+export type IndexLockKind = "init" | "sync";
+
 export type LockAttempt =
 	| {
 		status: "acquired";
@@ -55,8 +64,11 @@ export type LockAttempt =
 
 /** What `autoIndex` needs from a lock; the real one is {@link realInitLock}. */
 export interface InitLock {
-	acquire(project: string): LockAttempt;
+	/** One index writer at a time: an init or a sync, whichever asks first. */
+	acquire(project: string, options?: { kind?: IndexLockKind }): LockAttempt;
 	isHeld(project: string): boolean;
+	/** Whether an init (not a sync) is running; the explorer's prefetch is only skipped for an init. */
+	isInitRunning?(project: string): boolean;
 }
 
 interface Owner {
@@ -70,6 +82,8 @@ interface Owner {
 	initPidAt?: number;
 	/** `initPid` is the process that was spawned around the init (a shell), not the init itself. */
 	initProxy?: boolean;
+	/** What the holder is doing: creating the index or syncing it. Missing in records written before it existed. */
+	kind?: IndexLockKind;
 }
 
 function lockPath(project: string, options: LockOptions): string {
@@ -111,7 +125,8 @@ function readOwner(lock: string): Owner | undefined {
 		const valid = Number.isInteger(owner.pid) && typeof owner.startedAt === "number" && typeof owner.token === "string"
 			&& (owner.initPid === undefined || Number.isInteger(owner.initPid))
 			&& (owner.initPidAt === undefined || typeof owner.initPidAt === "number")
-			&& (owner.initProxy === undefined || typeof owner.initProxy === "boolean");
+			&& (owner.initProxy === undefined || typeof owner.initProxy === "boolean")
+			&& (owner.kind === undefined || owner.kind === "init" || owner.kind === "sync");
 		return valid ? owner : undefined;
 	} catch {
 		return undefined;
@@ -182,9 +197,9 @@ function clearStale(project: string, lock: string, options: LockOptions, token: 
  * Takes the init lock of `project`. Never throws: when the temp folder cannot be used the session goes on as if
  * it had the lock, which is how it behaved before locks existed.
  */
-export function tryAcquireInitLock(project: string, options: LockOptions = {}): LockAttempt {
+export function tryAcquireInitLock(project: string, options: LockOptions = {}, kind: IndexLockKind = "init"): LockAttempt {
 	const lock = lockPath(project, options);
-	const mine: Owner = { pid: process.pid, startedAt: options.now?.() ?? Date.now(), token: randomBytes(8).toString("hex") };
+	const mine: Owner = { pid: process.pid, startedAt: options.now?.() ?? Date.now(), token: randomBytes(8).toString("hex"), kind };
 	const adopt = (pid: number, adoptOptions: { proxy?: boolean } = {}) => {
 		if (readOwner(lock)?.token !== mine.token) return;
 		mine.initPid = pid;
@@ -224,7 +239,23 @@ export function isInitLocked(project: string, options: LockOptions = {}): boolea
 	}
 }
 
+/**
+ * Whether an init (as opposed to a sync) is running on `project` right now. Reads only. The explorer's prefetch is
+ * skipped for an init, which creates the database; a sync of an existing index leaves the prefetch to do its work.
+ */
+export function isInitRunning(project: string, options: LockOptions = {}): boolean {
+	try {
+		const lock = lockPath(project, options);
+		if (!held(project, lock, options)) return false;
+		// A record that cannot be read yet is someone writing it: counting it as an init only costs a prefetch.
+		return readOwner(lock)?.kind !== "sync";
+	} catch {
+		return false;
+	}
+}
+
 export const realInitLock: InitLock = {
-	acquire: (project) => tryAcquireInitLock(project),
+	acquire: (project, options) => tryAcquireInitLock(project, {}, options?.kind),
 	isHeld: (project) => isInitLocked(project),
+	isInitRunning: (project) => isInitRunning(project),
 };

@@ -22,9 +22,6 @@ this skill is available.
   for ongoing initialization, indexing, or synchronization where possible;
   do not start another operation while one is running. If you cannot tell
   whether it is safe, explain the uncertainty instead of assuming it is.
-- If the extension blocks an explicitly requested rebuild because an index
-  already exists, use the escape hatch named in the block reason. Do not use
-  it to bypass the guard for routine instructions.
 - Treat CodeGraph results as navigation hints, not authoritative source.
   Confirm relevant behavior and findings against the source files.
 

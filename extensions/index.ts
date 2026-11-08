@@ -4,10 +4,10 @@ import { getAgentDir, type ExtensionAPI, type ExtensionContext } from "@earendil
 import { Text } from "@earendil-works/pi-tui";
 import { applyCodegraphSubagents, readExposureWarning, readMissingServerWarning } from "../src/apply.ts";
 import { prepareProject, runCodegraph, type SessionStartReason } from "../src/autoindex.ts";
-import { guardIndexCommand } from "../src/codegraph-guard.ts";
+import { compactionSync, realSyncLock } from "../src/compaction-sync.ts";
 import { exploreViaDaemon } from "../src/daemonclient.ts";
-import { realInitLock } from "../src/initlock.ts";
-import { chooseIndexNotice, firstPromptMessage, INDEX_NOTICE_TYPE, logPrefetch, noticeTools, type PrefetchOutcome } from "../src/index-notice.ts";
+import { realInitLock, isInitRunning } from "../src/initlock.ts";
+import { chooseIndexNotice, firstPromptMessage, INDEX_NOTICE_TYPE, logPrefetch, logSync, noticeTools, type PrefetchOutcome } from "../src/index-notice.ts";
 import { explorePerCase, prefetchForExplorer } from "../src/prefetch.ts";
 import { messageText, promptContext, promptMessageLine } from "../src/prompt-context.ts";
 import { warmUpDaemon } from "../src/warmup.ts";
@@ -25,10 +25,14 @@ function startAutoIndex(reason: SessionStartReason, ctx: ExtensionContext): void
 		exists: existsSync,
 		run: runCodegraph,
 		lock: realInitLock,
+		sync: realSyncLock,
 		warm: (cwd) => warmUpDaemon(cwd),
 		onStart: (action) => say(action === "init" ? "creating the CodeGraph index of this project..." : "syncing the CodeGraph index...", "info"),
 		onIndexed: (result) => {
 			if (result.joined) say("another session is creating the CodeGraph index of this project", "info");
+			else if (result.coalesced) say("another session is syncing the CodeGraph index of this project", "info");
+			else if (result.queued) say("the CodeGraph index sync is waiting for the index to be free", "info");
+			else if (result.unavailable) say(`could not coordinate the CodeGraph index sync in ${ctx.cwd}`, "warning");
 			else if (!result.ok) say(`codegraph ${result.action} failed in ${ctx.cwd}`, "warning");
 			else say(result.action === "init" ? "CodeGraph index created" : "CodeGraph index synced", "info");
 		},
@@ -48,8 +52,19 @@ function startAutoIndex(reason: SessionStartReason, ctx: ExtensionContext): void
 export default function (pi: ExtensionAPI) {
 	let firstPromptSeen = false;
 	// The summary of a compaction drops the first-prompt message; the next user prompt may send it again.
-	pi.on("session_compact", () => {
+	pi.on("session_compact", (_event, ctx) => {
 		firstPromptSeen = false;
+		// A long session's index is only as fresh as its last sync, so a compaction asks for one in the
+		// background: never an init, never a notification, and its result goes to sync.log.
+		void compactionSync({
+			cwd: ctx.cwd,
+			env: process.env,
+			exists: existsSync,
+			lock: realInitLock,
+			sync: realSyncLock,
+			run: runCodegraph,
+			log: (entry) => logSync(entry),
+		});
 	});
 
 	// The first-prompt message as one short line that expands to the full text; what the model gets is unchanged.
@@ -60,20 +75,6 @@ export default function (pi: ExtensionAPI) {
 			return new Text(theme.fg("customMessageText", line), options.outputPad, 0);
 		});
 	}
-
-	// A `codegraph index` from the model, often asked for by an AGENTS.md rule, would rebuild an index that exists and
-	// stop its daemon. Blocked with the reason and the escape hatch; init and sync run as before.
-	pi.on("tool_call", async (event, ctx) => {
-		try {
-			if (event.toolName !== "bash" && event.toolName !== "bash_background") return undefined;
-			const command = (event.input as { command?: unknown }).command;
-			if (typeof command !== "string") return undefined;
-			const reason = guardIndexCommand({ command, cwd: ctx.cwd });
-			return reason === undefined ? undefined : { block: true, reason };
-		} catch {
-			return undefined;
-		}
-	});
 
 	pi.on("session_start", async (event, ctx) => {
 		startAutoIndex(event.reason, ctx);
@@ -130,7 +131,8 @@ export default function (pi: ExtensionAPI) {
 				cwd: ctx.cwd,
 				exists: existsSync,
 				initRunning: (cwd) => {
-					const held = realInitLock.isHeld(cwd);
+					// Only an init creates the database; a sync of an existing index leaves the prefetch to do its work.
+					const held = isInitRunning(cwd);
 					if (held) outcome = "skipped-init-running";
 					return held;
 				},
