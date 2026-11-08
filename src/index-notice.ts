@@ -50,7 +50,7 @@ export function indexNotice(root: string, tools: string[]): string {
 	return [
 		`${INDEX_NOTICE_MARKER} This workspace HAS a CodeGraph index at ${root}. The extension verified that .codegraph/codegraph.db exists.`,
 		`- To locate or understand code (where X is defined, who calls Y, how Z works), call ${toolLine(tools)} FIRST, before grep, find or broad reads.`,
-		"- Do not use find, grep or ls to check whether the index exists: .codegraph/ is git-ignored, so those tools never show it.",
+		"- Do not check whether the index exists: the extension already verified it. Pi's find and grep tools, fd and rg respect .gitignore, so they never show .codegraph/.",
 		"- Use read for exact line ranges once you know the file, and grep for string literals CodeGraph does not index (translations, configs, docs) or when CodeGraph did not find what you need.",
 		'- If CodeGraph reports a file "changed on disk after the last index sync", read that file directly with targeted line ranges instead of falling back to recursive search.',
 	].join("\n");

@@ -85,7 +85,7 @@ test("S1: no notice on a non-user prompt, once sent, without a CodeGraph tool or
 	assert.equal(chooseIndexNotice({ ...base, cwd: plain }), undefined);
 });
 
-test("S1: an explorer child gets a notice that names its MCP tool and forbids checking with find/grep/ls", (t) => {
+test("S1: an explorer child gets a notice that names its MCP tool and says no check is needed", (t) => {
 	const root = indexedDir(t);
 	const notice = chooseIndexNotice({ cwd: join(root, "src"), child: true, selectedTools: ["read", "grep", "find", "mcp__codegraph__*", MCP], isUserPrompt: true, alreadySent: false });
 	assert.ok(notice);
@@ -93,8 +93,9 @@ test("S1: an explorer child gets a notice that names its MCP tool and forbids ch
 	assert.ok(notice.includes(root), "the model gets the real directory");
 	assert.match(notice, /HAS a CodeGraph index/);
 	assert.match(notice, /`mcp__codegraph__codegraph_explore`/);
-	assert.match(notice, /do not use find, grep or ls to check/i);
-	assert.match(notice, /git-ignored/);
+	assert.match(notice, /do not check whether the index exists: the extension already verified it/i);
+	assert.match(notice, /Pi's find and grep tools, fd and rg respect \.gitignore, so they never show \.codegraph\//);
+	assert.doesNotMatch(notice, /\bls\b/, "ls does show .codegraph/, so the notice must not claim otherwise");
 	assert.doesNotMatch(notice, /`codegraph` tool/, "the explorer does not hold the extension tool");
 });
 
@@ -110,7 +111,7 @@ test("S1: the main session gets a notice naming both CodeGraph tools it holds", 
 test("S1: the notice asks for the tools first and says how to search when CodeGraph is not enough", () => {
 	const notice = indexNotice("C:\\project", ["codegraph"]);
 	assert.match(notice, /call the `codegraph` tool .* FIRST, before grep, find or broad reads/);
-	assert.match(notice, /do not use find, grep or ls to check/i);
+	assert.match(notice, /do not check whether the index exists/i);
 	assert.match(notice, /grep for string literals/);
 });
 
