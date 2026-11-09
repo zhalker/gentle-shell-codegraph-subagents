@@ -1,0 +1,2 @@
+# Test fixtures reproduce agent files byte for byte: gentle-pi reads an agent only when it starts with "---" and LF.
+test/fixtures/** text eol=lf
