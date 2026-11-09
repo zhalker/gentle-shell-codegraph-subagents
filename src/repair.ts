@@ -375,6 +375,27 @@ function settleAgentFileSwaps(input: { agentDir: string; env: Env }, restore: bo
 	return outcome;
 }
 
+/** The head of an agent file: everything before gentle-pi's body. */
+function headOf(content: string): string {
+	return content.slice(0, content.length - agentBody(content).length);
+}
+
+/**
+ * A shipped body says nothing about the frontmatter above it, where the tools live: the frontmatter must be
+ * what a published version of this extension wrote from the agent the installed gentle-pi ships, so a
+ * frontmatter edited by hand is never handed back.
+ */
+function publishedFrontmatter(written: string, pi: GentlePi, name: string): boolean {
+	let asset: string;
+	try {
+		asset = withoutRouting(readFileSync(join(pi.dir, "assets", AGENTS, name), "utf8"));
+	} catch {
+		return false;
+	}
+	const head = headOf(written);
+	return [normalizeAgentV020ToV060(asset), normalizeAgentV010(asset)].some((made) => headOf(made) === head);
+}
+
 /** Why a file is not repaired, or `undefined` when it is. */
 function blocker(
 	input: { content: string; backup: string | undefined; name: string; agent: string },
@@ -391,7 +412,7 @@ function blocker(
 
 	const written = withoutRouting(input.content);
 	const published = [normalizeAgentV020ToV060(withoutRouting(input.backup)), normalizeAgentV010(withoutRouting(input.backup))];
-	if (!published.includes(written) && !withoutWorkerMarker(agentBody(input.content)).some(isShipped)) {
+	if (!published.includes(written) && !(withoutWorkerMarker(agentBody(input.content)).some(isShipped) && publishedFrontmatter(written, pi, input.name))) {
 		return "neither a published version of this extension nor gentle-pi itself wrote its content";
 	}
 

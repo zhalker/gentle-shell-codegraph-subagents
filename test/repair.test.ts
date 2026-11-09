@@ -54,6 +54,9 @@ function setup(t: TestContext, options: Options = {}): string {
 	if (options.history !== null) {
 		writeFileSync(join(piDir, "assets", "migrations", "agent-body-history.json"), options.history ?? JSON.stringify({ schemaVersion: 1, bodies: shippedBodies() }));
 	}
+	// The agents the installed gentle-pi ships: the synthetic shipped fixtures.
+	mkdirSync(join(piDir, "assets", "agents"), { recursive: true });
+	for (const name of readdirSync(join(FIXTURES, "shipped"))) writeFileSync(join(piDir, "assets", "agents", name), shippedText(name));
 	mkdirSync(join(agentDir, "gentle-ai"), { recursive: true });
 	writeFileSync(join(agentDir, "gentle-ai", "managed-assets.json"), JSON.stringify({ schemaVersion: 1, assets: options.manifest ?? {} }));
 	if (options.models !== null) {
@@ -175,8 +178,9 @@ test("S8: a repairable file is swapped to the pending name, and its backup is by
 });
 
 test("S8 condition 2: a file whose body is a shipped body is repairable even when no normalizer produced it", (t) => {
-	// gentle-pi refreshed the body, an older version of this package then edited the frontmatter and froze it.
-	const edited = shippedText("gentle-ai-verify.md").replace("  - bash\n", "  - bash\n  - codegraph\n");
+	// gentle-pi refreshed the file, an older version of this package then edited it and froze it.
+	const edited = normalizeAgentV020ToV060(shippedText("gentle-ai-verify.md"));
+	assert.notEqual(edited, shippedText("gentle-ai-verify.md"));
 	const agentDir = setup(t, {
 		agents: { "gentle-ai-verify.md": edited, [`gentle-ai-verify.md${BACKUP_SUFFIX}`]: derivedText("gentle-ai-verify.backup.md") },
 	});
@@ -186,9 +190,23 @@ test("S8 condition 2: a file whose body is a shipped body is repairable even whe
 	assert.equal(outcome.repaired.length, 1);
 });
 
+test("S10 condition 2: a shipped body under a frontmatter edited by hand is left alone", (t) => {
+	const edited = normalizeAgentV020ToV060(shippedText("gentle-ai-verify.md")).replace("  - bash\n", "  - bash\n  - my_own_tool\n");
+	const agentDir = setup(t, {
+		agents: { "gentle-ai-verify.md": edited, [`gentle-ai-verify.md${BACKUP_SUFFIX}`]: derivedText("gentle-ai-verify.backup.md") },
+	});
+	const before = listing(agentDir);
+	const outcome = repair(agentDir);
+	assert.deepEqual(listing(agentDir), before);
+	assert.equal(read(agentDir, "gentle-ai-verify.md"), edited);
+	assert.deepEqual(outcome.repaired, []);
+	assert.match(outcome.skipped.find((note) => note.file.endsWith("gentle-ai-verify.md"))?.reason ?? "", /neither a published version/);
+});
+
 test("S8 condition 2: a trailing worker marker does not hide a shipped body", (t) => {
 	// 0.6.0 appended the marker to the worker after gentle-pi had refreshed its body.
-	const edited = shippedText("gentle-ai-worker.md").replace("  - edit\n", "  - edit\n  - codegraph\n") + "\n<!-- codegraph-workflow:worker -->\n";
+	const edited = normalizeAgentV020ToV060(shippedText("gentle-ai-worker.md"));
+	assert.match(edited, /<!-- codegraph-workflow:worker -->/);
 	const agentDir = setup(t, {
 		agents: { "gentle-ai-worker.md": edited, [`gentle-ai-worker.md${BACKUP_SUFFIX}`]: derivedText("gentle-ai-worker.backup.md") },
 	});

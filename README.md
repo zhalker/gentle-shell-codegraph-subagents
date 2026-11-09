@@ -56,7 +56,7 @@ In `~/.pi/agent/agents/` only, and outside subagent children, one more thing hap
 
 - gentle-pi is installed where Pi keeps it (`~/.pi/agent/npm/node_modules/gentle-pi`, `package.json` name `gentle-pi`) and its `assets/migrations/agent-body-history.json` is readable. Otherwise nothing is touched and the reason is shown.
 - Its `<file>.pre-codegraph-subagents.bak` exists, and that backup without gentle-ai's blocks is a body gentle-pi itself ships.
-- Without its `model:`/`thinking:` lines, the file is exactly what the normalizer of 0.1.0 or 0.2.0-0.6.0 wrote from that backup, or its body (after a trailing `<!-- codegraph-workflow:worker -->` line) is a body gentle-pi ships.
+- Without its `model:`/`thinking:` lines, the file is exactly what the normalizer of 0.1.0 or 0.2.0-0.6.0 wrote from that backup, or its body (after a trailing `<!-- codegraph-workflow:worker -->` line) is a body gentle-pi ships and its frontmatter is exactly what that normalizer writes from the agent the installed gentle-pi ships. A frontmatter edited by hand (tools, description) is never repaired.
 - Its `model:`/`thinking:` lines are absent or equal the entry `~/.pi/gentle-ai/models.json` holds for that agent, so the recreated file gets the same routing.
 - `~/.pi/agent/gentle-ai/managed-assets.json` does not list the file with its current content: gentle-pi still manages it, so it was never frozen.
 - `GENTLE_PI_AGENT_HOME`, when it is set, names this same agent directory. gentle-pi resolves its agent home as `GENTLE_PI_AGENT_HOME`, then `PI_CODING_AGENT_DIR`, then `~/.pi/agent`; if the first one points somewhere else, gentle-pi recreates its agents there and nothing here is touched, with that reason shown.
