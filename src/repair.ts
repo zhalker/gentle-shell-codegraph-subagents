@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { existsSync, linkSync, mkdirSync, readFileSync, readdirSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, linkSync, mkdirSync, readFileSync, readdirSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { isAbsolute, join, resolve } from "node:path";
 import { normalizeAgentV010, normalizeAgentV020ToV060 } from "./legacy-agents.ts";
 import { WORKER_MARKER } from "./skill-reminder.ts";
@@ -257,6 +257,22 @@ function moveUnlessExists(from: string, to: string): "moved" | "exists" | "missi
 	return "moved";
 }
 
+/**
+ * Whether `original` is a file of its own rather than the other name of `pending`: a swap or restore in
+ * another session links one name to the other before unlinking the first, so for a moment both exist and
+ * hold the same file. Without inode numbers, equal bytes count as the same file. Unknown means not distinct.
+ */
+function distinctFiles(original: string, pending: string): boolean {
+	try {
+		const a = statSync(original, { bigint: true });
+		const b = statSync(pending, { bigint: true });
+		if (a.ino !== 0n && b.ino !== 0n) return a.ino !== b.ino || a.dev !== b.dev;
+		return readFileSync(original, "utf8") !== readFileSync(pending, "utf8");
+	} catch {
+		return false;
+	}
+}
+
 function entriesOf(dir: string): string[] {
 	try {
 		return readdirSync(dir).sort();
@@ -311,6 +327,10 @@ function settleAgentFileSwaps(input: { agentDir: string; env: Env }, restore: bo
 		const pending = join(dir, name);
 		const original = join(dir, name.slice(0, -PENDING_SUFFIX.length));
 		if (existsSync(original)) {
+			if (!distinctFiles(original, pending)) {
+				outcome.skipped.push({ file: original, reason: "another session is moving it right now, so it was left alone" });
+				continue;
+			}
 			try {
 				unlinkSync(pending);
 				outcome.settled.push({ file: original, reason: "gentle-pi recreated the file, so the repaired copy was removed" });

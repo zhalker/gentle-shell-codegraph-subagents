@@ -1,7 +1,7 @@
 import { test, type TestContext } from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { normalizeAgentV010, normalizeAgentV020ToV060 } from "../src/legacy-agents.ts";
@@ -285,6 +285,19 @@ test("S11: a load that finds the file recreated and a pending copy removes the p
 	assert.equal(outcome.settled.length, 1);
 	assert.match(outcome.settled[0].reason, /recreated the file/);
 	assert.deepEqual(outcome.repaired, []);
+});
+
+test("S11: a swap another session is halfway through (both names on one file) is never settled", (t) => {
+	const agentDir = setup(t, { agents: { "jd-judge-a.md": derivedText(FROZEN), [`jd-judge-a.md${BACKUP_SUFFIX}`]: derivedText(BACKUP) } });
+	const dir = join(agentDir, "agents");
+	linkSync(join(dir, "jd-judge-a.md"), join(dir, `jd-judge-a.md${PENDING_SUFFIX}`));
+	const before = listing(agentDir);
+	const loaded = repair(agentDir);
+	const prompted = settleAgentFileRepairs({ agentDir, env: {} });
+	assert.deepEqual(listing(agentDir), before);
+	assert.equal(read(agentDir, `jd-judge-a.md${PENDING_SUFFIX}`), derivedText(FROZEN));
+	assert.deepEqual([...loaded.settled, ...loaded.repaired, ...prompted.settled], []);
+	assert.equal(existsSync(join(agentDir, "codegraph-subagents")), false);
 });
 
 test("S8: GENTLE_PI_AGENT_HOME naming another directory skips the whole repair", (t) => {
