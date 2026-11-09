@@ -8,7 +8,9 @@ import { applyCodegraphSubagents, readExposureWarning, readMissingServerWarning 
 import { CODEGRAPH_MCP_TOOL } from "../src/agents.ts";
 
 const VERIFY = `---\nname: gentle-ai-verify\ndescription: v\ntools: read, bash, mcp\n---\n\nYou verify.\n\n<!-- gentle-ai:pi-codegraph-tool -->\nUse the Pi MCP proxy tool \`mcp\`.\n<!-- /gentle-ai:pi-codegraph -->\n`;
-const REVIEW = `---\nname: review-risk\ndescription: r\ntools:\n  - read\n  - mcp\n---\n\nYou review.\n`;
+const REVIEW = `---\nname: review-risk\ndescription: r\ntools:\n  - read\n  - mcp\n---\n\nYou review.\n\n<!-- gentle-ai:pi-codegraph-guidance -->\n## CodeGraph\n<!-- /gentle-ai:pi-codegraph -->\n`;
+// A file gentle-ai never touched: it must come out byte for byte, or gentle-pi stops updating it.
+const PLAIN = `---\nname: gentle-ai-worker\ndescription: w\ntools: read, bash\n---\n\nYou work.\n`;
 const MCP = JSON.stringify({ mcpServers: { codegraph: { command: "codegraph" } } }, null, 2) + "\n";
 
 function setup(): string {
@@ -17,6 +19,7 @@ function setup(): string {
 	mkdirSync(join(dir, "subagents"));
 	writeFileSync(join(dir, "agents", "gentle-ai-verify.md"), VERIFY);
 	writeFileSync(join(dir, "subagents", "review-risk.md"), REVIEW);
+	writeFileSync(join(dir, "agents", "gentle-ai-worker.md"), PLAIN);
 	writeFileSync(join(dir, "mcp.json"), MCP);
 	return dir;
 }
@@ -31,6 +34,18 @@ test("S7: rewrites agent files in agents/ and subagents/ and the mcp.json, and r
 	assert.ok(!verify.includes("gentle-ai:pi-codegraph"));
 	assert.ok(!readFileSync(join(dir, "subagents", "review-risk.md"), "utf8").includes("- mcp"));
 	assert.equal(JSON.parse(readFileSync(join(dir, "mcp.json"), "utf8")).mcpServers.codegraph.toolExposure.codegraph_explore, "direct");
+});
+
+test("S3: a file without gentle-ai blocks is left byte for byte, with no backup and no report", () => {
+	const dir = setup();
+	const result = applyCodegraphSubagents(dir);
+	assert.deepEqual(result.changed.sort(), [
+		join(dir, "agents", "gentle-ai-verify.md"),
+		join(dir, "mcp.json"),
+		join(dir, "subagents", "review-risk.md"),
+	].sort());
+	assert.equal(readFileSync(join(dir, "agents", "gentle-ai-worker.md"), "utf8"), PLAIN);
+	assert.equal(existsSync(join(dir, "agents", "gentle-ai-worker.md.pre-codegraph-subagents.bak")), false);
 });
 
 test("S7: a second run changes and writes nothing", () => {
@@ -128,7 +143,8 @@ function sessionApplying(dir: string, startAt: number): Promise<{ changed: strin
 function manyAgentsDir(): { dir: string; names: string[]; originals: Record<string, string> } {
 	const dir = setup();
 	for (let i = 0; i < 6; i++) writeFileSync(join(dir, "agents", `gentle-ai-verify${i}.md`), VERIFY);
-	const names = [...readdirSync(join(dir, "agents")).map((entry) => join("agents", entry)), join("subagents", "review-risk.md"), "mcp.json"];
+	// The untouched file is not rewritten and gets no backup, so it is not part of the concurrent rewrites.
+	const names = [...readdirSync(join(dir, "agents")).map((entry) => join("agents", entry)).filter((entry) => entry !== join("agents", "gentle-ai-worker.md")), join("subagents", "review-risk.md"), "mcp.json"];
 	return { dir, names, originals: Object.fromEntries(names.map((name) => [name, readFileSync(join(dir, name), "utf8")])) };
 }
 

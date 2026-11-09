@@ -1,4 +1,5 @@
 import { existsSync } from "node:fs";
+import { homedir } from "node:os";
 import { join } from "node:path";
 import { getAgentDir, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
@@ -11,7 +12,17 @@ import { chooseIndexNotice, firstPromptMessage, INDEX_NOTICE_TYPE, logPrefetch, 
 import { explorePerCase, prefetchForExplorer } from "../src/prefetch.ts";
 import { messageText, promptContext, promptMessageLine } from "../src/prompt-context.ts";
 import { warmUpDaemon } from "../src/warmup.ts";
+import { repairFrozenAgentFiles, repairNotices, settleAgentFileRepairs, type RepairOutcome } from "../src/repair.ts";
 import { chooseSkillReminder, SKILL_REMINDER_TYPE } from "../src/skill-reminder.ts";
+
+// The repair never throws into extension loading or into a prompt: a failed repair is simply no repair.
+function safeRepair(run: () => RepairOutcome): RepairOutcome | undefined {
+	try {
+		return run();
+	} catch {
+		return undefined;
+	}
+}
 
 // Starts the index sync (or first init) and then the daemon warm-up in the background; the session never waits for them.
 function startAutoIndex(reason: SessionStartReason, ctx: ExtensionContext): void {
@@ -51,6 +62,15 @@ function startAutoIndex(reason: SessionStartReason, ctx: ExtensionContext): void
 // or a gentle-ai sync that rewrote the agent files is corrected on the next launch.
 export default function (pi: ExtensionAPI) {
 	let firstPromptSeen = false;
+	// Runs at load, before gentle-pi's own startup install: a frozen agent file is moved aside here, so that
+	// install recreates it from its assets and manages it again. A subagent child repairs nothing.
+	const loadRepair = process.env.GENTLE_PI_AGENTS_CHILD === "1" ? undefined : safeRepair(() => repairFrozenAgentFiles({ agentDir: getAgentDir(), home: homedir(), env: process.env }));
+	const notifyRepair = (ctx: ExtensionContext, outcome: RepairOutcome | undefined) => {
+		if (!ctx.hasUI) return;
+		for (const notice of repairNotices(outcome)) ctx.ui.notify(`gentle-shell-codegraph-subagents: ${notice.text}`, notice.level);
+	};
+	// The swap is settled once, on the first prompt of the parent session: gentle-pi's install has run by then.
+	let swapSettled = false;
 	// The summary of a compaction drops the first-prompt message; the next user prompt may send it again.
 	pi.on("session_compact", (_event, ctx) => {
 		firstPromptSeen = false;
@@ -82,6 +102,7 @@ export default function (pi: ExtensionAPI) {
 			const { changed, errors } = applyCodegraphSubagents(getAgentDir());
 			if (!ctx.hasUI) return;
 			if (changed.length > 0) ctx.ui.notify(`gentle-shell-codegraph-subagents: updated ${changed.length} file(s)`, "info");
+			notifyRepair(ctx, loadRepair);
 			if (errors.length > 0) ctx.ui.notify(`gentle-shell-codegraph-subagents: ${errors.length} file(s) skipped: ${errors[0]}`, "warning");
 			const registered = pi.getMcpServers?.().some((server) => server.name === "codegraph") ?? false;
 			if (process.env.GENTLE_PI_AGENTS_CHILD !== "1" && readMissingServerWarning(getAgentDir(), ctx.cwd, ctx.isProjectTrusted(), registered)) {
@@ -102,6 +123,10 @@ export default function (pi: ExtensionAPI) {
 		try {
 			const isUserPrompt = event.messageType === "user";
 			const child = process.env.GENTLE_PI_AGENTS_CHILD === "1";
+			if (!swapSettled) {
+				swapSettled = true;
+				if (!child) notifyRepair(ctx, safeRepair(() => settleAgentFileRepairs({ agentDir: getAgentDir(), env: process.env })));
+			}
 			// Already sent means still in what the model sees: after a compaction both come back once.
 			const state = promptContext(ctx.sessionManager.getBranch());
 			const alreadySent = firstPromptSeen || state.reminderInContext;
@@ -110,6 +135,8 @@ export default function (pi: ExtensionAPI) {
 				skills: event.systemPromptOptions?.skills ?? [],
 				child,
 				systemPrompt: event.systemPrompt,
+				// A worker child is recognised by where gentle-pi put its body, not by a marker in its file.
+				argv: process.argv,
 				alreadySent,
 				isUserPrompt,
 			});
