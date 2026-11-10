@@ -500,7 +500,7 @@ export function repairFrozenAgentFiles(input: RepairInput): RepairOutcome {
 
 export interface RepairNotice {
 	text: string;
-	level: "info" | "warning";
+	level: "info";
 }
 
 const fileName = (file: string): string => file.split(/[\\/]/).at(-1) ?? file;
@@ -510,17 +510,10 @@ function few(notes: RepairNote[]): string {
 	return names.length <= 3 ? names.join(", ") : `${names.slice(0, 3).join(", ")} and ${names.length - 3} more`;
 }
 
-function grouped(notes: RepairNote[]): string {
-	const reasons = new Map<string, RepairNote[]>();
-	for (const note of notes) {
-		const known = reasons.get(note.reason) ?? [];
-		known.push(note);
-		reasons.set(note.reason, known);
-	}
-	return [...reasons].map(([reason, list]) => `${list.map((note) => fileName(note.file)).join(", ")}: ${reason}`).join("; ");
-}
-
-/** One notice per kind of outcome, in the shape the session-start apply report uses. */
+/**
+ * One notice per action taken, in the shape the session-start apply report uses. Skipped files are not shown:
+ * a file left alone needs nothing from the user, and its reason stays in the outcome.
+ */
 export function repairNotices(outcome: RepairOutcome | undefined): RepairNotice[] {
 	if (outcome === undefined) return [];
 	const notices: RepairNotice[] = [];
@@ -529,9 +522,6 @@ export function repairNotices(outcome: RepairOutcome | undefined): RepairNotice[
 	}
 	if (outcome.settled.length > 0) {
 		notices.push({ text: `settled ${outcome.settled.length} repaired agent file(s): ${few(outcome.settled)}`, level: "info" });
-	}
-	if (outcome.skipped.length > 0) {
-		notices.push({ text: `left ${outcome.skipped.length} agent file(s) alone (${grouped(outcome.skipped)})`, level: "warning" });
 	}
 	return notices;
 }

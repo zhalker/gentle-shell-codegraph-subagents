@@ -352,11 +352,16 @@ test("S8: a subagent child repairs and settles nothing", (t) => {
 	assert.deepEqual(settled.settled, []);
 });
 
-test("S8: every repaired and skipped file is reported with its reason for the session-start notification", (t) => {
+test("a skipped file shows no session-start notification: only repaired and settled files are shown", (t) => {
 	const agentDir = setup(t, { agents: { "jd-judge-a.md": derivedText(FROZEN) } });
-	const notices = repairNotices(repair(agentDir));
-	assert.equal(notices.length, 1);
-	assert.equal(notices[0].level, "warning");
-	assert.match(notices[0].text, /jd-judge-a\.md: it has no \.pre-codegraph-subagents\.bak to repair it from/);
+	const outcome = repair(agentDir);
+	assert.match(reasons(outcome.skipped), /it has no \.pre-codegraph-subagents\.bak to repair it from/);
+	assert.deepEqual(repairNotices(outcome), []);
 	assert.deepEqual(repairNotices(undefined), []);
+
+	const frozen = setup(t, { agents: frozenJudge() });
+	const notices = repairNotices(repair(frozen));
+	assert.equal(notices.length, 1);
+	assert.equal(notices[0].level, "info");
+	assert.match(notices[0].text, /handing 1 frozen agent file\(s\) back to gentle-pi: jd-judge-a\.md/);
 });
