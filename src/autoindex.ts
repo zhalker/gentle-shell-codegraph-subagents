@@ -1,9 +1,11 @@
 import { spawn } from "node:child_process";
+import { copyFileSync } from "node:fs";
 import { join } from "node:path";
-import { codegraphWritingIndex, type InitLock } from "./initlock.ts";
+import { codegraphWritingIndex, isInitLocked, type InitLock } from "./initlock.ts";
 import { killTree } from "./prefetch.ts";
 import { projectArgument } from "./daemonclient.ts";
 import { codegraphSpawn } from "./paths.ts";
+import { seedWorktreeIndex, worktreeIndexAction } from "./seed.ts";
 
 export { codegraphWritingIndex } from "./initlock.ts";
 
@@ -16,7 +18,7 @@ export const INIT_TIMEOUT_MS = 600_000;
 /** The environment variable a subagent child carries; children never start an index operation of their own. */
 export const CHILD_ENV = "GENTLE_PI_AGENTS_CHILD";
 
-export type IndexAction = "sync" | "init" | "none";
+export type IndexAction = "sync" | "init" | "seed" | "none";
 export type SessionStartReason = "startup" | "reload" | "new" | "resume" | "fork";
 
 /** What one coordinated sync did here, or why it did not run. */
@@ -51,7 +53,6 @@ export function planIndexAction(cwd: string, exists: (path: string) => boolean):
 	if (exists(join(cwd, ".git")) && INIT_PROJECT_MARKERS.some((marker) => exists(join(cwd, marker)))) return "init";
 	return "none";
 }
-
 export interface AutoIndexInput {
 	/** Where Pi was started. */
 	cwd: string;
@@ -62,8 +63,12 @@ export interface AutoIndexInput {
 	lock?: InitLock;
 	/** One sync per project at a time across sessions, with pending requests coalesced; absent means no coordination. */
 	sync?: SyncCoordinator;
+	/** Whether the main repo's index is being written right now, for seeding a worktree from it. Defaults to the init lock of the common root. */
+	sourceBusy?(commonRoot: string): boolean;
+	/** Copies the seed db from the main repo into the worktree; defaults to a plain file copy. */
+	copySeed?(from: string, to: string): boolean;
 	/** Called right before the command starts, so the user can be told what is going on. */
-	onStart?(action: "sync" | "init"): void;
+	onStart?(action: "sync" | "init" | "seed"): void;
 	/** Whether CodeGraph is writing this index right now; defaults to {@link codegraphWritingIndex}. */
 	codegraphBusy?(cwd: string): boolean;
 	/** Runs `codegraph <args>` in `cwd`; true when it exited 0. `onSpawn` gets the pid of that process. */
@@ -92,9 +97,36 @@ export interface AutoIndexResult {
 export async function autoIndex(input: AutoIndexInput): Promise<AutoIndexResult> {
 	try {
 		if (skipsSession(input)) return { action: "none", ok: true };
-		const action = planIndexAction(input.cwd, input.exists);
+		const worktreeAction = worktreeIndexAction(input.cwd, input.exists);
+		const action: IndexAction = worktreeAction.action === "none" ? "none" : worktreeAction.action;
 		if (action === "none") return { action, ok: true };
 		const announce = () => { try { input.onStart?.(action); } catch { /* telling the user is never worth stopping the index */ } };
+		if (action === "seed") {
+			// Two sessions starting at once in the same worktree must not seed twice: the worktree's own init
+			// lock covers the whole seed-plus-sync, exactly like a plain init.
+			const attempt = input.lock?.acquire(input.cwd);
+			if (attempt?.status === "busy") return { action, ok: true, joined: true };
+			const adopt = attempt?.status === "acquired" ? attempt.adopt : () => {};
+			try {
+				if (input.exists(join(input.cwd, ".codegraph"))) return { action, ok: true, joined: true };
+				const commonRoot = (worktreeAction as { action: "seed"; commonRoot: string }).commonRoot;
+				const busy = input.sourceBusy ?? ((root: string) => input.lock?.isInitLocked(root) ?? false);
+				if (busy(commonRoot)) return { action, ok: true, joined: true };
+				announce();
+				const seeded = seedWorktreeIndex({
+					worktree: input.cwd,
+					commonRoot,
+					sourceBusy: () => busy(commonRoot),
+					copy: input.copySeed ?? defaultCopySeed,
+				});
+				if (!seeded) return { action, ok: false };
+				// The seeded db reflects the main tree; the worktree's first sync reconciles it to this tree.
+				const ok = await input.run(["sync", "-q"], input.cwd, SYNC_TIMEOUT_MS, (pid, options) => adopt(pid, options));
+				return { action, ok };
+			} finally {
+				attempt?.release();
+			}
+		}
 		if (action === "sync") {
 			// An init holds the index: nothing may touch it meanwhile, and this session leaves it to that one.
 			// A sync holding it is different: the index exists, so this request is coalesced into it instead.
@@ -129,6 +161,16 @@ export async function autoIndex(input: AutoIndexInput): Promise<AutoIndexResult>
 		}
 	} catch {
 		return { action: planIndexAction(input.cwd, input.exists), ok: false };
+	}
+}
+
+/** The seed copy for real runs: a plain file copy of the db, staged by {@link seedWorktreeIndex}. */
+function defaultCopySeed(from: string, to: string): boolean {
+	try {
+		copyFileSync(from, to);
+		return true;
+	} catch {
+		return false;
 	}
 }
 
@@ -227,8 +269,8 @@ export async function prepareProject(input: PrepareInput): Promise<PrepareResult
 	if (index.action !== "none") {
 		try { input.onIndexed?.(index); } catch { /* telling the user is never worth stopping the warm-up */ }
 	}
-	// A sync that failed still leaves an index to warm; a failed init leaves nothing worth warming.
-	const hasIndex = !index.joined && (index.action === "sync" || (index.action === "init" && index.ok));
+	// A sync that failed still leaves an index to warm; a failed init or seed leaves nothing worth warming.
+	const hasIndex = !index.joined && (index.action === "sync" || (index.action === "init" && index.ok) || (index.action === "seed" && index.ok));
 	if (skipsSession(input) || !hasIndex) return { index, warm: "skipped" };
 	try { input.onWarmStart?.(); } catch { /* telling the user is never worth stopping the warm-up */ }
 	try {
