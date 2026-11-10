@@ -5,7 +5,7 @@ import { codegraphWritingIndex, isInitLocked, type InitLock } from "./initlock.t
 import { killTree } from "./prefetch.ts";
 import { projectArgument } from "./daemonclient.ts";
 import { codegraphSpawn } from "./paths.ts";
-import { seedWorktreeIndex, worktreeIndexAction } from "./seed.ts";
+import { seedWorktreeIndex, worktreeIndexAction, worktreeOf } from "./seed.ts";
 
 export { codegraphWritingIndex } from "./initlock.ts";
 
@@ -75,9 +75,24 @@ export interface AutoIndexInput {
 	run(args: string[], cwd: string, timeoutMs: number, onSpawn?: (pid: number, options?: { proxy?: boolean }) => void): Promise<boolean>;
 }
 
-/** Subagent children share the parent's cwd and the parent already did the work; a /reload is not a new session. */
+/** Subagent children of one parent share the parent's project: a /reload is not a new session. */
 function skipsSession(input: Pick<AutoIndexInput, "env" | "reason">): boolean {
-	return input.env[CHILD_ENV] === "1" || input.reason === "reload";
+	return input.env[CHILD_ENV] === "1" && !childWorktreeNeedsIndex(input) || input.reason === "reload";
+}
+
+/**
+ * A subagent child may run in a linked git worktree of its own instead of the parent's project (the
+ * orchestrator hands out `workspace_root`). There it does the same background work a fresh session would:
+ * seed its own index from the main checkout's, or initialise one. Everywhere else a child keeps skipping:
+ * it shares the parent's cwd, and the parent already did the work — a child never starts an index for the
+ * parent's own project.
+ */
+function childWorktreeNeedsIndex(input: Pick<AutoIndexInput, "cwd" | "env" | "exists">): boolean {
+	if (input.env[CHILD_ENV] !== "1") return false;
+	if (!worktreeOf(input.cwd).worktree) return false;
+	if (input.exists(join(input.cwd, ".codegraph"))) return false;
+	const action = worktreeIndexAction(input.cwd, input.exists).action;
+	return action === "seed" || action === "init";
 }
 
 export interface AutoIndexResult {
@@ -110,7 +125,7 @@ export async function autoIndex(input: AutoIndexInput): Promise<AutoIndexResult>
 			try {
 				if (input.exists(join(input.cwd, ".codegraph"))) return { action, ok: true, joined: true };
 				const commonRoot = (worktreeAction as { action: "seed"; commonRoot: string }).commonRoot;
-				const busy = input.sourceBusy ?? ((root: string) => input.lock?.isInitLocked(root) ?? false);
+				const busy = input.sourceBusy ?? ((root: string) => (typeof input.lock?.isInitLocked === "function" ? input.lock.isInitLocked(root) : false));
 				if (busy(commonRoot)) return { action, ok: true, joined: true };
 				announce();
 				const seeded = seedWorktreeIndex({

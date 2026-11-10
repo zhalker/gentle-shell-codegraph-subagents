@@ -336,12 +336,33 @@ test("S17: with no init lock held an existing index is synced as always", async 
 	assert.deepEqual(result, { action: "sync", ok: true });
 });
 
-test("S17: subagent children and /reload never even look at the lock", async () => {
+test("S17: subagent children and /reload never even look at the lock, unless the child runs in an unindexed worktree", async (t) => {
+	// The parent's own project: the parent did the work, the child skips everything.
 	for (const options of [{ env: { GENTLE_PI_AGENTS_CHILD: "1" }, reason: "startup" as const }, { env: {}, reason: "reload" as const }]) {
 		const log: string[] = [];
 		await autoIndex({ cwd: CWD, ...options, exists: withFiles(".git", "package.json"), lock: fakeLock(log, false), run: async () => true });
 		assert.deepEqual(log, [], JSON.stringify(options));
 	}
+	// An unindexed linked worktree is the one place a child does the background work of a fresh session.
+	const base = mkdtempSync(join(tmpdir(), "child-s17-"));
+	const repo = join(base, "repo");
+	const worktree = join(base, "wt");
+	mkdirSync(repo);
+	spawnSync("git", ["init"], { cwd: repo });
+	writeFileSync(join(repo, "file.txt"), "x\n");
+	spawnSync("git", ["add", "file.txt"], { cwd: repo });
+	spawnSync("git", ["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "x"], { cwd: repo });
+	spawnSync("git", ["worktree", "add", worktree, "-b", "s17-branch"], { cwd: repo });
+	t.after(() => rmSync(base, { recursive: true, force: true }));
+	mkdirSync(join(repo, ".codegraph"));
+	writeFileSync(join(repo, ".codegraph", "codegraph.db"), "seed");
+	const log: string[] = [];
+	const result = await autoIndex({
+		cwd: worktree, env: { GENTLE_PI_AGENTS_CHILD: "1" }, reason: "startup", exists: existsSync,
+		lock: fakeLock(log, false), copySeed: (from, to) => { writeFileSync(to, "seed"); return true; }, run: async () => true,
+	});
+	assert.deepEqual(result, { action: "seed", ok: true }, "the child seeds its worktree's own index");
+	assert.deepEqual(log, ["lock:acquire", "lock:release"], JSON.stringify(log));
 });
 
 // --- Coordination with the other sessions of this user: startup and compaction syncs never run at the same time. ---
