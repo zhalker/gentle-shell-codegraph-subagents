@@ -38,14 +38,19 @@ function startAutoIndex(reason: SessionStartReason, ctx: ExtensionContext): void
 		lock: realInitLock,
 		sync: realSyncLock,
 		warm: (cwd) => warmUpDaemon(cwd),
-		onStart: (action) => say(action === "init" ? "creating the CodeGraph index of this project..." : "syncing the CodeGraph index...", "info"),
+		onStart: (action) => say(
+			action === "init" ? "creating the CodeGraph index of this project..."
+				: action === "seed" ? "seeding this worktree's CodeGraph index from the main repo's index..."
+				: "syncing the CodeGraph index...", "info"),
 		onIndexed: (result) => {
 			if (result.joined) say("another session is creating the CodeGraph index of this project", "info");
 			else if (result.coalesced) say("another session is syncing the CodeGraph index of this project", "info");
 			else if (result.queued) say("the CodeGraph index sync is waiting for the index to be free", "info");
 			else if (result.unavailable) say(`could not coordinate the CodeGraph index sync in ${ctx.cwd}`, "warning");
 			else if (!result.ok) say(`codegraph ${result.action} failed in ${ctx.cwd}`, "warning");
-			else say(result.action === "init" ? "CodeGraph index created" : "CodeGraph index synced", "info");
+			else say(result.action === "init" ? "CodeGraph index created"
+				: result.action === "seed" ? "CodeGraph index seeded from the main repo and synced"
+				: "CodeGraph index synced", "info");
 		},
 		onWarmStart: () => say("warming up CodeGraph...", "info"),
 	})
