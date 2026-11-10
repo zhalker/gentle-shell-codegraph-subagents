@@ -1,0 +1,28 @@
+# worktree-codegraph-index
+
+Índice CodeGraph propio y sincronizado para worktrees de Git abiertos por el orquestador de Gentle Shell. Plan aprobado: `C:\xampp\htdocs\zh_lia\projects\worktree_codegraph_index\reports\plan-viabilidad.md`; mediciones: `tests/mediciones-worktree-2026-11-09.md` del mismo proyecto.
+
+## Specs
+
+- S1: "ese worktree obviamente no tendra .codegraph inicializado" → la sesión en un worktree sin `.codegraph` termina con un índice propio del worktree, no del repo principal.
+- S2: "que tenga .codegraph, este sincronizado y todo lo demas" → una vez creado, el ciclo existente (sync en arranque, resume y post-compacción) lo mantiene; no se añade un segundo mecanismo.
+- S3 (decisión aprobada): el índice es propio de cada worktree, nunca compartido con el principal; la siembra copia el db del principal solo cuando existe y no está escribiendo.
+- S4 (juicio final, salvedad I2): la copia del db es segura bajo concurrencia (respeto del lock del principal, sin torn copy); dos sesiones que arrancan a la vez en el mismo worktree no siembran dos veces.
+- S5: un worktree cuyo principal no tiene índice recibe un `codegraph init -y` normal (comportamiento actual, demostrado viable).
+- S6: los avisos al usuario nombran la siembra ("sembrando el índice del worktree...") y sus fallos; los tests y el README del paquete cubren la función nueva.
+
+## Tasks
+
+- [x] T2 | S1 S5 | inline | commit: 6e33cac | `src/worktree.ts`: leer `.git` como archivo, parsear `gitdir:`, resolver la raíz común; `{ esWorktree, mainRoot }`. Función pura, RED→GREEN. 6 tests.
+- [x] T3 | S1 S3 S4 S5 | inline | commit: 9380a40 | `worktreeIndexAction`/`seedWorktreeIndex` (`src/seed.ts`) + integración en `autoIndex` con lock del worktree y `sourceBusy` del principal; copia por defecto `copyFileSync` (staged + limpieza si falla). 7 tests; autoindex/prepare existentes sin cambios.
+- [x] T4 | S2 S6 | inline | commit: adb88df | Avisos de siembra en `extensions/index.ts` + README del paquete.
+- [x] T5 | S6 | inline | commits: 3 de este feature | Suite completa 311/311 + e2e real con `runCodegraph` en un worktree de este repo: `{action:"seed",ok:true}`, índice consultable.
+
+## Log
+
+- L1 (2026-11-10). Solicitud de origen, verbatim: "Bien, ahora tomaremos esta tarea larga que se trata sobre los worktrees...aqui en gentle-shell a veces puede el orquestador crear un worktree de un proyecto para poder trabajar pero ese worktree obviamente no tendra .codegraph inicializado. Hay que hacer un plan de como podemos hacer para....que tenga .codegraph, este sincronizado y todo lo demas etc etc, proponme algo". Viabilidad sondeada (init 14.5s viable; siembra 5.0s, rutas relativas, control de línea 513 exacto) y plan aprobado: "aprobado tu recomendacion" (2026-11-10).
+- L2 (2026-11-10). Owner, verbatim: "y si algo cambia o hay algo nuevo, actualiza el plan .md con evidencia de porque y su justificacion".
+- L3 (2026-11-10, implementación). Cambios respecto al plan y su justificación:
+  - La decisión de worktree vive en `src/seed.ts` (`worktreeIndexAction`, `seedWorktreeIndex`), no dentro de `planIndexAction`: así `compactionSync` y los tests existentes siguen usando `planIndexAction` puro y la decisión nueva solo se activa en el arranque (`autoIndex`). Justificación: separación de responsabilidades y cero riesgo para el sync post-compacción.
+  - La copia segura del db (S4) es por defecto `copyFileSync` del db solo, con el chequeo de `sourceBusy` (lock del principal) antes de copiar y re-chequeo dentro del seed; staging `codegraph.db.seeding` y limpieza total del `.codegraph` si algo falla. El plan mencionaba `-wal` o `VACUUM INTO`; el sondeo mostró que el db del principal con daemon abierto copió consistente, y el chequeo doble de busy cierra la ventana: la opción WAL quedó como mejora futura si se observa un torn copy real. Evidencia: sondeo D4/D5 + 2 tests de rechazo (busy → nada copiado; fallo de copia → sin `.codegraph` a medias).
+  - Hallazgo del e2e (informativo, no del paquete): `execFileSync('codegraph', ...)` sin shell falla en Windows con `status: null` (shim .cmd de npm); el wiring real ya lo maneja (`runCodegraph` usa `shell: true` en win32). Justificación de mencionarlo: dos e2e dieron `ok:false` por el harness, no por la siembra; el e2e con `runCodegraph` real dio `{action:"seed",ok:true}` y un índice consultable en el worktree.
