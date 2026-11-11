@@ -1,5 +1,6 @@
 import { mkdirSync, copyFileSync, existsSync, rmSync } from "node:fs";
 import { join } from "node:path";
+export { worktreeOf } from "./worktree.ts";
 import { worktreeOf } from "./worktree.ts";
 import { planIndexAction } from "./autoindex.ts";
 
