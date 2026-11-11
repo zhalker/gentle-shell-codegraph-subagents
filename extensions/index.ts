@@ -12,6 +12,8 @@ import { chooseIndexNotice, firstPromptMessage, INDEX_NOTICE_TYPE, logPrefetch, 
 import { explorePerCase, prefetchForExplorer } from "../src/prefetch.ts";
 import { messageText, promptContext, promptMessageLine } from "../src/prompt-context.ts";
 import { seedSessionWorktrees } from "../src/session-seed.ts";
+import { seedWorktreeIndex } from "../src/seed.ts";
+import { worktreeOf } from "../src/worktree.ts";
 import { warmUpDaemon } from "../src/warmup.ts";
 import { repairFrozenAgentFiles, repairNotices, settleAgentFileRepairs, type RepairOutcome } from "../src/repair.ts";
 import { chooseSkillReminder, SKILL_REMINDER_TYPE } from "../src/skill-reminder.ts";
@@ -111,6 +113,24 @@ export default function (pi: ExtensionAPI) {
 				try { copyFileSync(from, to); return true; } catch { return false; }
 			} })).catch(() => {});
 		}
+		// The precise hook, when it exists: gentle-pi emits its session worktree registry event on Pi's shared
+		// extension event bus every time a worktree joins the session's working set (explicit register today).
+		// Subscribing here makes seeding event-driven instead of scan-driven. The channel is still gentle-pi's
+		// internal constant (see zh_lia/issues/gentle-shell-worktree-registry-event.md): a refactor that renames
+		// it must only degrade to the scan above, never break the session, so both the string and the payload
+		// are read defensively and the subscription is best-effort.
+		try {
+			const unsubscribeWorktreeEvent = pi.events?.on?.("gentle-pi:session-worktree-changed", (payload: unknown) => {
+				try {
+					const e = payload as { sessionId?: unknown } | undefined;
+					if (!e || e.sessionId !== ctx.sessionManager.getSessionId()) return;
+					void Promise.resolve().then(() => seedSessionWorktrees({ cwd: ctx.cwd, exists: existsSync, sourceBusy: () => isInitRunning(ctx.cwd), copy: (from, to) => {
+						try { copyFileSync(from, to); return true; } catch { return false; }
+					} })).catch(() => {});
+				} catch { /* a failed event-driven seed just falls back to the next scan */ }
+			});
+			if (typeof unsubscribeWorktreeEvent === "function") pi.on("session_shutdown", () => unsubscribeWorktreeEvent());
+		} catch { /* without the bus the scan at session start still covers every worktree it sees */ }
 		try {
 			const { changed, errors } = applyCodegraphSubagents(getAgentDir());
 			if (!ctx.hasUI) return;
