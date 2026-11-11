@@ -1,4 +1,4 @@
-import { existsSync } from "node:fs";
+import { copyFileSync, existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { getAgentDir, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
@@ -11,6 +11,7 @@ import { realInitLock, isInitRunning } from "../src/initlock.ts";
 import { chooseIndexNotice, firstPromptMessage, INDEX_NOTICE_TYPE, logPrefetch, logSync, noticeTools, type PrefetchOutcome } from "../src/index-notice.ts";
 import { explorePerCase, prefetchForExplorer } from "../src/prefetch.ts";
 import { messageText, promptContext, promptMessageLine } from "../src/prompt-context.ts";
+import { seedSessionWorktrees } from "../src/session-seed.ts";
 import { warmUpDaemon } from "../src/warmup.ts";
 import { repairFrozenAgentFiles, repairNotices, settleAgentFileRepairs, type RepairOutcome } from "../src/repair.ts";
 import { chooseSkillReminder, SKILL_REMINDER_TYPE } from "../src/skill-reminder.ts";
@@ -103,6 +104,13 @@ export default function (pi: ExtensionAPI) {
 
 	pi.on("session_start", async (event, ctx) => {
 		startAutoIndex(event.reason, ctx);
+		// Seed the session repo's unindexed worktrees in the background, so the index exists before the first
+		// subagent child is handed one. Never waits, never announces: a skipped worktree costs nothing.
+		if (event.reason !== "reload") {
+			void Promise.resolve().then(() => seedSessionWorktrees({ cwd: ctx.cwd, exists: existsSync, sourceBusy: () => isInitRunning(ctx.cwd), copy: (from, to) => {
+				try { copyFileSync(from, to); return true; } catch { return false; }
+			} })).catch(() => {});
+		}
 		try {
 			const { changed, errors } = applyCodegraphSubagents(getAgentDir());
 			if (!ctx.hasUI) return;

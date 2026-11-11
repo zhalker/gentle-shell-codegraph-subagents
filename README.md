@@ -38,7 +38,7 @@ Every session keeps the project's CodeGraph index current on its own; a linked g
 3. Fresh git project with a known manifest → `codegraph init -y`.
 4. Anything else → nothing is created.
 
-The same decision runs for a subagent child whose `workspace_root` is a worktree: a child never touches the index of the directory it shares with its parent, but an unindexed worktree handed to it gets the seeding or init above, in the background, under the same locks. This is what makes orchestrator-created worktrees usable without opening a session in them: the first child brings its own index up, later ones just use it.
+The same decision runs for a subagent child whose `workspace_root` is a worktree: a child never touches the index of the directory it shares with its parent, but an unindexed worktree handed to it gets the seeding or init above, in the background, under the same locks. This is what makes orchestrator-created worktrees usable without opening a session in them: the first child brings its own index up, later ones just use it. On top of that, every parent session seeds its repository's unindexed linked worktrees at startup (one quiet `git worktree list`, then the same seeding decision per worktree), so the index usually exists before the first child is even handed the worktree; the child-side seeding stays as the fallback that guarantees it either way.
 
 A seeded index costs a copy plus one sync (~65% faster than a full init in the reference probe on this repository) and every worktree's database lives inside that worktree, so removing the worktree removes its index with it.
 
