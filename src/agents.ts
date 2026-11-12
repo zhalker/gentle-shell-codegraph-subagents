@@ -36,13 +36,22 @@ function removeBlocks(body: string, eol: string): string {
 }
 
 
-function editTools(front: string, eol: string): string {
+interface ParsedTools {
+	lines: string[];
+	at: number;
+	style: "bracket" | "csv" | "list";
+	items: string[];
+	consumed: number;
+	indent: string;
+	name: string;
+}
+
+function parseTools(front: string): ParsedTools | undefined {
 	const lines = front.split(/\r?\n/);
 	const nameLine = lines.find((line) => /^name:/.test(line));
 	const name = nameLine ? unquote(nameLine.slice("name:".length)) : "";
 	const at = lines.findIndex((line) => /^tools:/.test(line));
-	if (at === -1) return front;
-
+	if (at === -1) return undefined;
 	const rest = lines[at].slice("tools:".length).trim();
 	let style: "bracket" | "csv" | "list";
 	let items: string[];
@@ -65,30 +74,60 @@ function editTools(front: string, eol: string): string {
 			consumed++;
 		}
 	}
-	if (items.length === 0) return front;
+	return { lines, at, style, items, consumed, indent, name };
+}
 
+function renderTools(parsed: ParsedTools, next: string[], eol: string): string {
+	const replacement =
+		parsed.style === "list" ? ["tools:", ...next.map((item) => `${parsed.indent}- ${item}`)]
+		: parsed.style === "bracket" ? [`tools: [${next.join(", ")}]`]
+		: [`tools: ${next.join(", ")}`];
+	return [...parsed.lines.slice(0, parsed.at), ...replacement, ...parsed.lines.slice(parsed.at + parsed.consumed)].join(eol);
+}
+
+function editTools(front: string, eol: string): string {
+	const parsed = parseTools(front);
+	if (!parsed) return front;
+	const { style, items } = parsed;
+	if (items.length === 0) return front;
 	let next = items.filter((item) => unquote(item) !== "mcp" && !isBrokenEntry(item));
-	if (AGENTS_WITH_MCP_TOOL.has(name) && !next.some((item) => unquote(item) === CODEGRAPH_MCP_TOOL)) next.push(CODEGRAPH_MCP_TOOL);
+	if (AGENTS_WITH_MCP_TOOL.has(parsed.name) && !next.some((item) => unquote(item) === CODEGRAPH_MCP_TOOL)) next.push(CODEGRAPH_MCP_TOOL);
 	// An empty list would hand the agent Pi's default tools; keep what was there instead.
 	if (next.length === 0 || next.join("\n") === items.join("\n")) return front;
+	return renderTools(parsed, next, eol);
+}
 
-	const replacement =
-		style === "list" ? ["tools:", ...next.map((item) => `${indent}- ${item}`)]
-		: style === "bracket" ? [`tools: [${next.join(", ")}]`]
-		: [`tools: ${next.join(", ")}`];
-	return [...lines.slice(0, at), ...replacement, ...lines.slice(at + consumed)].join(eol);
+/**
+ * The block-free path: for the six agents, add the CodeGraph MCP tool when it is missing — and only that.
+ * Nothing else changes: dead proxy entries and broken `"*": false` entries stay, because this file may be
+ * one gentle-pi still manages and the owner asked for the minimal edit that makes the tool available.
+ */
+function addMissingMcpTool(front: string, eol: string): string {
+	const parsed = parseTools(front);
+	if (!parsed) return front;
+	if (!AGENTS_WITH_MCP_TOOL.has(parsed.name)) return front;
+	if (parsed.items.length === 0) return front;
+	if (parsed.items.some((item) => unquote(item) === CODEGRAPH_MCP_TOOL)) return front;
+	return renderTools(parsed, [...parsed.items, CODEGRAPH_MCP_TOOL], eol);
 }
 
 /**
  * Returns the agent definition with the CodeGraph wiring applied; identical text when nothing changes.
- * A file with no gentle-ai marker blocks is left byte for byte: editing it makes gentle-pi stop
- * refreshing that agent on upgrades, so it is only touched when gentle-ai already froze it.
+ * A file that still carries the gentle-ai marker blocks is normalized the old way (blocks and dead proxy
+ * entries removed, tool added). A block-free file — a gentle-pi-managed agent, a standalone install, or one
+ * the user edited — gets exactly one minimal edit: for the six agents, the CodeGraph MCP tool is appended
+ * when missing. The owner accepted that this single-line edit freezes the agent's file at its current
+ * version for gentle-pi's installer (any local edit does), because the alternative is subagents without
+ * CodeGraph at all; the first-rewrite backup keeps the pre-edit bytes.
  */
 export function normalizeAgent(text: string): string {
-	if (!HAS_GENTLE_AI_BLOCK.test(text)) return text;
 	const match = FRONTMATTER.exec(text);
 	if (!match) return text;
 	const [, open, front, close, body] = match;
 	const eol = text.includes("\r\n") ? "\r\n" : "\n";
+	if (!HAS_GENTLE_AI_BLOCK.test(text)) {
+		const next = addMissingMcpTool(front, eol);
+		return next === front ? text : open + next + close + body;
+	}
 	return open + editTools(front, eol) + close + removeBlocks(body, eol);
 }

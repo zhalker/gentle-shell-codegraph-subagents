@@ -45,15 +45,33 @@ test("S1: removes both gentle-ai CodeGraph blocks and leaves the rest of the bod
 	assert.ok(output.endsWith("You verify.\n"), `body kept and ends with one newline, got ${JSON.stringify(output.slice(-30))}`);
 });
 
-test("S3: a file without gentle-ai marker blocks is returned byte for byte, so gentle-pi keeps updating it", () => {
+test("S3: a block-free file gets exactly the missing MCP tool appended for the six agents, nothing else", () => {
 	const cases: Record<string, string> = {
 		worker: agent("gentle-ai-worker", "tools: read, bash", "Worker instructions."),
 		explorer: agent("gentle-ai-explore", "tools: read, grep, find, codegraph", "You explore."),
+		// Only the tool is added: the broken `\"*\": false` entry and the dead `mcp` proxy entry stay.
 		judge: agent("jd-judge-a", 'tools: *": false, read, grep, find, bash, mcp', "You judge."),
 		withoutMcpTool: agent("gentle-ai-verify", "tools: read, grep, find, bash", "You verify.\n\nNothing about the graph here."),
-		crlf: `---\r\nname: gentle-ai-verify\r\ndescription: x\r\ntools: read, mcp\r\n---\r\n\r\nYou verify.\r\n`,
 	};
-	for (const [label, input] of Object.entries(cases)) assert.equal(normalizeAgent(input), input, label);
+	for (const [label, input] of Object.entries(cases)) {
+		const output = normalizeAgent(input);
+		assert.notEqual(output, input, label);
+		assert.ok(output.includes(CODEGRAPH_MCP_TOOL), label);
+		// Exactly one edit: the body and every other frontmatter line are identical.
+		const [inputFront, outputFront] = [input, output].map((text) => /^---\n([\s\S]*?)\n---/.exec(text)![1]);
+		assert.deepEqual(outputFront.split("\n").filter((line) => !line.startsWith("tools:")), inputFront.split("\n").filter((line) => !line.startsWith("tools:")), label);
+		assert.equal(output.slice(output.indexOf("\n---") + 1), input.slice(input.indexOf("\n---") + 1), label);
+	}
+	// A CRLF file keeps its line endings.
+	const crlf = `---\r\nname: gentle-ai-verify\r\ndescription: x\r\ntools: read, mcp\r\n---\r\n\r\nYou verify.\r\n`;
+	const crlfOut = normalizeAgent(crlf);
+	assert.ok(crlfOut.includes(CODEGRAPH_MCP_TOOL));
+	assert.ok(crlfOut.includes("\r\n"));
+	// Outside the six, or already carrying the tool: byte for byte.
+	const outsider = agent("some-other-agent", "tools: read, bash", "Other.");
+	assert.equal(normalizeAgent(outsider), outsider);
+	const hasTool = agent("gentle-ai-worker", `tools: read, ${CODEGRAPH_MCP_TOOL}`, "Worker instructions.");
+	assert.equal(normalizeAgent(hasTool), hasTool);
 });
 
 test("S1: a block in the middle of the body is removed without gluing the neighbours", () => {
@@ -74,10 +92,12 @@ test("S2: a frozen explorer keeps its codegraph tool, gains the MCP tool, and ke
 
 test("S5: no worker marker is appended to the file", () => {
 	const untouched = agent("gentle-ai-worker", "tools: read, bash", "Worker instructions.");
-	assert.equal(normalizeAgent(untouched), untouched);
-	const output = normalizeAgent(agent("gentle-ai-worker", "tools: read, bash", `Worker instructions.${BLOCKS}`));
+	const output = normalizeAgent(untouched);
+	assert.ok(output.includes(CODEGRAPH_MCP_TOOL), "the missing tool is added");
 	assert.ok(!output.includes("<!-- codegraph-workflow:worker -->"), output);
-	assert.ok(!output.includes("gentle-ai:pi-codegraph"), output);
+	const withBlocks = normalizeAgent(agent("gentle-ai-worker", "tools: read, bash", `Worker instructions.${BLOCKS}`));
+	assert.ok(!withBlocks.includes("<!-- codegraph-workflow:worker -->"), output);
+	assert.ok(!withBlocks.includes("gentle-ai:pi-codegraph"), output);
 });
 
 test("S2: other agents keep a codegraph tool they declare", () => {

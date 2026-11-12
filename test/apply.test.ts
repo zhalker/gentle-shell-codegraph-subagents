@@ -28,7 +28,7 @@ test("S7: rewrites agent files in agents/ and subagents/ and the mcp.json, and r
 	const dir = setup();
 	const result = applyCodegraphSubagents(dir);
 	assert.deepEqual(result.errors, []);
-	assert.equal(result.changed.length, 3);
+	assert.equal(result.changed.length, 4); // verify (blocks), review-risk (blocks), mcp.json, and the block-free worker missing the tool
 	const verify = readFileSync(join(dir, "agents", "gentle-ai-verify.md"), "utf8");
 	assert.ok(verify.includes(`tools: read, bash, ${CODEGRAPH_MCP_TOOL}`));
 	assert.ok(!verify.includes("gentle-ai:pi-codegraph"));
@@ -36,16 +36,32 @@ test("S7: rewrites agent files in agents/ and subagents/ and the mcp.json, and r
 	assert.equal(JSON.parse(readFileSync(join(dir, "mcp.json"), "utf8")).mcpServers.codegraph.toolExposure.codegraph_explore, "direct");
 });
 
-test("S3: a file without gentle-ai blocks is left byte for byte, with no backup and no report", () => {
+test("S3: a block-free agent of the six without the MCP tool gets exactly that tool added, nothing else", () => {
 	const dir = setup();
 	const result = applyCodegraphSubagents(dir);
-	assert.deepEqual(result.changed.sort(), [
-		join(dir, "agents", "gentle-ai-verify.md"),
-		join(dir, "mcp.json"),
-		join(dir, "subagents", "review-risk.md"),
-	].sort());
-	assert.equal(readFileSync(join(dir, "agents", "gentle-ai-worker.md"), "utf8"), PLAIN);
+	const worker = readFileSync(join(dir, "agents", "gentle-ai-worker.md"), "utf8");
+	assert.equal(worker, `---\nname: gentle-ai-worker\ndescription: w\ntools: read, bash, ${CODEGRAPH_MCP_TOOL}\n---\n\nYou work.\n`);
+	assert.ok(result.changed.includes(join(dir, "agents", "gentle-ai-worker.md")));
+	assert.equal(existsSync(join(dir, "agents", "gentle-ai-worker.md.pre-codegraph-subagents.bak")), true);
+});
+
+test("S3: a block-free agent of the six that already carries the MCP tool is left byte for byte", () => {
+	const dir = setup();
+	const withTool = `---\nname: gentle-ai-worker\ndescription: w\ntools: read, bash, ${CODEGRAPH_MCP_TOOL}\n---\n\nYou work.\n`;
+	writeFileSync(join(dir, "agents", "gentle-ai-worker.md"), withTool);
+	const result = applyCodegraphSubagents(dir);
+	assert.equal(readFileSync(join(dir, "agents", "gentle-ai-worker.md"), "utf8"), withTool);
+	assert.equal(result.changed.includes(join(dir, "agents", "gentle-ai-worker.md")), false);
 	assert.equal(existsSync(join(dir, "agents", "gentle-ai-worker.md.pre-codegraph-subagents.bak")), false);
+});
+
+test("S3: a block-free agent outside the six is left byte for byte, with no backup and no report", () => {
+	const dir = setup();
+	const outsider = `---\nname: some-other-agent\ndescription: o\ntools: read, bash\n---\n\nOther agent.\n`;
+	writeFileSync(join(dir, "agents", "some-other-agent.md"), outsider);
+	applyCodegraphSubagents(dir);
+	assert.equal(readFileSync(join(dir, "agents", "some-other-agent.md"), "utf8"), outsider);
+	assert.equal(existsSync(join(dir, "agents", "some-other-agent.md.pre-codegraph-subagents.bak")), false);
 });
 
 test("S7: a second run changes and writes nothing", () => {
@@ -125,7 +141,7 @@ test("a file that cannot be read is reported and the other files are still proce
 	const result = applyCodegraphSubagents(dir);
 	assert.equal(result.errors.length, 1);
 	assert.ok(result.errors[0].includes("broken.md"));
-	assert.equal(result.changed.length, 3);
+	assert.equal(result.changed.length, 4);
 	assert.ok(existsSync(join(dir, "mcp.json.pre-codegraph-subagents.bak")));
 });
 
