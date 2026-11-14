@@ -7,8 +7,9 @@ import { readExposureWarning, readMissingServerWarning } from "../src/apply.ts";
 import { sessionIndexRole } from "../src/agents.ts";
 import { linkedWorktrees, prepareProject, runCodegraph, seedLinkedWorktrees, syncAfterNativeInit, type SessionStartReason } from "../src/autoindex.ts";
 import { compactionSync, realSyncLock } from "../src/compaction-sync.ts";
+import { appendCodegraphSection, codegraphSection } from "../src/codegraph-rules.ts";
 import { codegraphWritingIndex, isInitLocked, realInitLock } from "../src/initlock.ts";
-import { chooseIndexNotice, firstPromptMessage, INDEX_NOTICE_TYPE, indexOutcomeNotice, indexStartNotice, initHookDecision, logSync, noticeTools, postInitSyncNotice, warmOutcomeNotice} from "../src/index-notice.ts";
+import { chooseIndexNotice, codegraphTools, firstPromptMessage, INDEX_NOTICE_TYPE, indexOutcomeNotice, indexStartNotice, initHookDecision, logSync, noticeTools, postInitSyncNotice, warmOutcomeNotice} from "../src/index-notice.ts";
 import { messageText, promptContext, promptMessageLine } from "../src/prompt-context.ts";
 import { warmUpDaemon } from "../src/warmup.ts";
 import { repairFrozenAgentFiles, repairNotices, settleAgentFileRepairs, type RepairOutcome } from "../src/repair.ts";
@@ -84,6 +85,8 @@ function seedSessionWorktrees(ctx: ExtensionContext): void {
 
 export default function (pi: ExtensionAPI) {
 	let firstPromptSeen = false;
+	// Whether this session's tools include CodeGraph, read once per run from the same list the rule is gated on.
+	let codegraphAvailable = false;
 	// Runs at load, before gentle-pi's own startup install: a frozen agent file is moved aside here, so that
 	// install recreates it from its assets and manages it again. A subagent child repairs nothing.
 	const loadRepair = process.env.GENTLE_PI_AGENTS_CHILD === "1" ? undefined : safeRepair(() => repairFrozenAgentFiles({ agentDir: getAgentDir(), home: homedir(), env: process.env }));
@@ -194,6 +197,11 @@ export default function (pi: ExtensionAPI) {
 				swapSettled = true;
 				if (!child) notifyRepair(ctx, safeRepair(() => settleAgentFileRepairs({ agentDir: getAgentDir(), env: process.env })));
 			}
+			// The rule rides the prompt options, ahead of any message: a session without a CodeGraph tool
+			// (a reviewer, for example) gets no section at all.
+			const tools = noticeTools(event.systemPromptOptions?.selectedTools ?? [], process.env.GENTLE_PI_AGENTS_REQUESTED_TOOLS, child);
+			codegraphAvailable = codegraphTools(tools).length > 0;
+			appendCodegraphSection(event, codegraphSection({ tools }));
 			// Already sent means still in what the model sees: after a compaction both come back once.
 			const state = promptContext(ctx.sessionManager.getBranch());
 			const alreadySent = firstPromptSeen || state.reminderInContext;
