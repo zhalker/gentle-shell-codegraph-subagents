@@ -16,7 +16,7 @@ in plain words instead of being left to guesswork.
 | Resolve the daemon of that checkout, reusing a live registered one | Treat an MCP server entry as evidence that a daemon is reachable, rewrite `mcp.json`, or kill a daemon it did not start |
 | Report `completed`, `pending`, `skipped`, `failed` honestly in notices and logs | Call a queued, joined, coalesced or failed request a synced index |
 | Keep verify and the judges out of every index write | Edit an agent file, strip a tool a user added, or add the native tool to a read-only role |
-| Append the CodeGraph rule to the system prompt of every session that can call CodeGraph, and remind once before the first search | Ship a skill, edit an agent file, or replace the harness's system prompt |
+| Append the CodeGraph rule to the system prompt of every session that can call CodeGraph | Ship a skill, edit an agent file, or replace the harness's system prompt |
 
 Agent files and `mcp.json` are never written. gentle-shell ships `mcp__codegraph__codegraph_explore` in the
 explorer, verifier, worker, fix agent and both judges itself, so there is nothing to patch; the extension reads
@@ -110,11 +110,26 @@ read, so results are treated as hints to verify against source, and no notice ca
 
 ## The CodeGraph rule in the system prompt
 
-The rule is one generic section for every agent that can call CodeGraph, the primary session and the subagents,
-except the reviewers. It is the three-bullet block gentle-shell already ships in its orchestrator and explorer
-assets: use the `codegraph` tool before symbol searches with `rg` or `grep` and before broad `find`; write only the
-current workspace's `.codegraph/` index; and fall back to `read`, `grep` and `find` only when CodeGraph is
-unavailable or fails.
+The approved wording lives in `src/codegraph-rules/`, one Markdown file per role, and the code reads the text of the
+session's own role from disk. Nothing is reworded in code, so the text stays reviewable and editable as prose, and a
+role that does not need the `init` guidance does not carry it.
+
+| Session | Text |
+| --- | --- |
+| the primary session (no `GENTLE_PI_AGENTS_CHILD=1`) | `orchestrator.md` |
+| `gentle-ai-explore` | `explore.md` |
+| `gentle-ai-verify` | `verify.md` |
+| `gentle-ai-worker` | `worker.md` |
+| `jd-fix-agent` | `fix.md` |
+| `jd-judge-a`, `jd-judge-b` | `judge.md` |
+| any other child, a name that is not recognised, or a text that cannot be read | `generic.md` |
+
+The agent name is read from the child's own command line, where gentle-pi passes its agent body as
+`<tmpdir>/gentle-pi-subagent-<agent>-<random>/instructions.md`; no environment variable carries it. A name the table
+does not carry is kept as the directory spells it, so a `review-` child is still recognised by its prefix.
+
+Each file is read at most once per variant, and a read never throws. A missing, unreadable or heading-less file falls
+back to `generic.md`, and when that cannot be read either the session gets no section rather than a broken prompt.
 
 It is injected by `before_agent_start`, by mutating `event.systemPromptOptions.appendSystemPrompt` in place:
 
@@ -123,39 +138,29 @@ It is injected by `before_agent_start`, by mutating `event.systemPromptOptions.a
 - Idempotent by its `## CodeGraph` heading. A session that already carries the section is left alone.
 - Gated on the session's tools. The selected tools are read, plus the tool list gentle-pi requested for a subagent
   child (its MCP tools are not selected yet when the hook runs). A session holding neither the native `codegraph`
-  tool nor `mcp__codegraph__codegraph_explore` gets nothing, which is how a reviewer stays out.
+  tool nor `mcp__codegraph__codegraph_explore` gets nothing, which is how a reviewer stays out; so does an agent
+  whose name starts with `review-`, even when it holds the tool.
 - The index fact lives inside the section. When `.codegraph/codegraph.db` is found at or above the session's
   directory, one line says the workspace has an index; there is no separate first-prompt notice, no message
   renderer and no message to re-send after a compaction.
 - Non-throwing. A missing event, missing options or a non-string append field is left alone, so the prompt keeps
   exactly what the harness wrote.
 
-## Exploration reminder
-
-The rule asks for CodeGraph first, so the extension also reminds a session that ignores it:
-
-- The `tool_call` hook records a native `codegraph` or MCP `codegraph_explore` call.
-- The first search-shaped call (`grep`, `find`, `ls`, or `bash`/`powershell` running a command that invokes
-  `grep`, `rg`, `find`, `fd`, `ls`, `dir`, `Get-ChildItem` and the like) made before any CodeGraph call in that
-  session sends one message through `pi.sendMessage`, naming the rule.
-- At most once per session; `session_compact` starts the budget over, because the reminder may have been
-  summarized away.
-- The call is never blocked or altered, and nothing in the hook throws.
-- Only the primary session and a read-only, explorer-style child are candidates. A child whose requested tool list
-  contains a file-writing tool (`edit`, `write`, `bash_background`) is never reminded, nor is a child that does not
-  declare CodeGraph.
-- The shell check is a word match on the command line; an unusual command can be missed, and the message is
-  advisory either way.
+There is no exploration reminder. The rule permits a session with no CodeGraph call — an exact-string or filename
+lookup, a known file that needs no structural investigation, a run that only executes commands or tests — so a nudge
+fired on the first search would report a fault the rule allows.
 
 ## What the tests pin
 
 `test/index-coordination.test.ts`, `test/init-hook.test.ts`, `test/daemonclient.test.ts`, `test/warmup.test.ts`,
 `test/agents.test.ts`, `test/apply.test.ts`, `test/child-index.test.ts`, `test/index-notice.test.ts`,
-`test/codegraph-rules.test.ts`, `test/exploration-reminder.test.ts` and `test/skill-package.test.ts` cover: the
+`test/codegraph-rules.test.ts` and `test/skill-package.test.ts` cover: the
 create-or-sync decision, the coordinated/unavailable/pending paths, all post-init outcomes including the
 no-sync-after-failure rule, daemon resolution per checkout with and without MCP configuration, explorer detection
 through the native tool and through MCP, a worktree versus its parent checkout, the read-only role rule, the two
-read-only `mcp.json` warnings (missing server, unavailable exposure), the exact section text and its gate,
-append/idempotency and the index line, the reminder's one-shot budget and compaction reset, and the absence of a
+read-only `mcp.json` warnings (missing server, unavailable exposure), the agent name read from a child's own argv and
+the six role mappings, the primary and generic cases, the exact text of every shipped file and its per-file read
+cache, the generic fallback of a missing or heading-less file, the tool and `review-` gates, append/idempotency and
+the index line, the absence of the exploration reminder, and the absence of a
 packaged skill. No test spawns a real `codegraph`, `git` or network call; runners are injected and scratch state
 lives under the system temp directory.
