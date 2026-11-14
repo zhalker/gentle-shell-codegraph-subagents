@@ -6,7 +6,7 @@ import assert from "node:assert/strict";
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { autoIndex, seedLinkedWorktrees } from "../src/autoindex.ts";
+import { autoIndex, linkedWorktrees, seedLinkedWorktrees } from "../src/autoindex.ts";
 import type { InitLock } from "../src/initlock.ts";
 
 const CWD = join("some", "repo");
@@ -175,4 +175,37 @@ test("S2: without an explicit source check, the main index's own lock decides wh
 	assert.equal(copied, false);
 	assert.deepEqual(result.seeded, []);
 	assert.equal(existsSync(join(worktree, ".codegraph")), false);
+});
+
+test("S2: a copy failure in one worktree does not stop the others and leaves nothing half-built", (t) => {
+	const base = scratch(t);
+	const first = linkedWorktree(join(base, "a"));
+	const second = linkedWorktree(join(base, "b"));
+	let attempts = 0;
+	const result = seedLinkedWorktrees({
+		worktrees: [first.worktree, second.worktree],
+		lock: recordingLock([], false),
+		exists: existsSync,
+		sourceBusy: () => false,
+		copy: (_from, to) => {
+			attempts += 1;
+			if (attempts === 1) return false; // the first worktree fails
+			writeFileSync(to, "seeded db");
+			return true;
+		},
+	});
+	assert.deepEqual(result.seeded, [join(second.worktree, ".codegraph", "codegraph.db")]);
+	assert.deepEqual(result.skipped, [{ worktree: first.worktree, reason: "the seed copy failed" }]);
+	assert.equal(existsSync(join(first.worktree, ".codegraph")), false, "the failed one left nothing behind");
+});
+
+// --- The scan itself: the plugin finds the repository's worktrees, and a directory that is not one yields nothing ---
+
+test("S2: the worktree scan reports what git lists, and nothing when git cannot answer", () => {
+	const base = mkdtempSync(join(tmpdir(), "pcs-scan-"));
+	rmSync(base, { recursive: true, force: true });
+	const porcelain = "worktree /repo\nHEAD abc\n\nworktree /repo-worktrees/odd\nHEAD def\n\n";
+	assert.deepEqual(linkedWorktrees({ cwd: "/repo", list: () => porcelain }), ["/repo", "/repo-worktrees/odd"]);
+	assert.deepEqual(linkedWorktrees({ cwd: "/repo", list: () => undefined }), [], "git failed: no worktrees, no throw");
+	assert.deepEqual(linkedWorktrees({ cwd: "/repo", list: () => { throw new Error("git is gone"); } }), [], "a throwing lister never reaches the session");
 });

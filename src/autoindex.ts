@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { copyFileSync } from "node:fs";
 import { join } from "node:path";
 import { mayInitiateIndexWrite, sessionIndexRole } from "./agents.ts";
@@ -256,6 +256,44 @@ export interface LinkedWorktreeSeedResult {
  * fresh decision is taken once the lock is held, and a failed copy leaves nothing behind. The main checkout is
  * never seeded (it is not a worktree). Never throws.
  */
+/** The `git worktree list --porcelain` output for a directory, or undefined when git cannot answer. */
+export type WorktreeLister = (cwd: string) => string | undefined;
+
+function gitWorktreeList(cwd: string): string | undefined {
+	try {
+		const run = spawnSync("git", ["worktree", "list", "--porcelain"], { cwd, encoding: "utf8" });
+		return run.status === 0 && typeof run.stdout === "string" ? run.stdout : undefined;
+	} catch {
+		return undefined;
+	}
+}
+
+/**
+ * The linked worktrees of the repository `cwd` belongs to, as one short `git worktree list` reports them. A
+ * directory that is not a Git repository, or a git that cannot answer, yields nothing instead of throwing.
+ */
+export function linkedWorktrees({
+	cwd,
+	list = gitWorktreeList,
+}: {
+	cwd: string;
+	list?: WorktreeLister;
+}): string[] {
+	try {
+		const found = worktreeOf(cwd);
+		const repoRoot = found.worktree ? found.commonRoot : cwd;
+		const stdout = list(repoRoot);
+		if (typeof stdout !== "string") return [];
+		return stdout
+			.split("\n")
+			.filter((line) => line.startsWith("worktree "))
+			.map((line) => line.slice("worktree ".length).trim())
+			.filter((root) => root.length > 0);
+	} catch {
+		return [];
+	}
+}
+
 export function seedLinkedWorktrees(input: LinkedWorktreeSeedInput): LinkedWorktreeSeedResult {
 	const result: LinkedWorktreeSeedResult = { seeded: [], skipped: [] };
 	for (const root of input.worktrees) {

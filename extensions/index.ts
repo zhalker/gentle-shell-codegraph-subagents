@@ -1,19 +1,17 @@
 import { copyFileSync, existsSync } from "node:fs";
-import { spawnSync } from "node:child_process";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { getAgentDir, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { applyCodegraphSubagents, readExposureWarning, readMissingServerWarning } from "../src/apply.ts";
 import { sessionIndexRole } from "../src/agents.ts";
-import { prepareProject, runCodegraph, seedLinkedWorktrees, syncAfterNativeInit, type SessionStartReason } from "../src/autoindex.ts";
+import { linkedWorktrees, prepareProject, runCodegraph, seedLinkedWorktrees, syncAfterNativeInit, type SessionStartReason } from "../src/autoindex.ts";
 import { compactionSync, realSyncLock } from "../src/compaction-sync.ts";
 import { exploreViaDaemon } from "../src/daemonclient.ts";
 import { codegraphWritingIndex, isInitLocked, isInitRunning, realInitLock } from "../src/initlock.ts";
 import { chooseIndexNotice, firstPromptMessage, INDEX_NOTICE_TYPE, indexOutcomeNotice, indexStartNotice, initHookDecision, logPrefetch, logSync, noticeTools, postInitSyncNotice, warmOutcomeNotice, type PrefetchOutcome } from "../src/index-notice.ts";
 import { explorePerCase, prefetchForExplorer } from "../src/prefetch.ts";
 import { messageText, promptContext, promptMessageLine } from "../src/prompt-context.ts";
-import { worktreeOf } from "../src/worktree.ts";
 import { warmUpDaemon } from "../src/warmup.ts";
 import { repairFrozenAgentFiles, repairNotices, settleAgentFileRepairs, type RepairOutcome } from "../src/repair.ts";
 import { chooseSkillReminder, SKILL_REMINDER_TYPE } from "../src/skill-reminder.ts";
@@ -59,21 +57,6 @@ function startAutoIndex(reason: SessionStartReason, ctx: ExtensionContext): void
 }
 
 /** The linked worktrees of this repository, as one short `git worktree list` reports them. */
-function linkedWorktrees(cwd: string): string[] {
-	try {
-		const found = worktreeOf(cwd);
-		const repoRoot = found.worktree ? found.commonRoot : cwd;
-		const run = spawnSync("git", ["worktree", "list", "--porcelain"], { cwd: repoRoot, encoding: "utf8" });
-		if (run.status !== 0 || typeof run.stdout !== "string") return [];
-		return run.stdout
-			.split("\n")
-			.filter((line) => line.startsWith("worktree "))
-			.map((line) => line.slice("worktree ".length).trim())
-			.filter((root) => root.length > 0);
-	} catch {
-		return [];
-	}
-}
 
 /**
  * Seeds this repository's unindexed linked worktrees in the background, so the index exists before the first
@@ -84,7 +67,7 @@ function seedSessionWorktrees(ctx: ExtensionContext): void {
 	void Promise.resolve().then(() => {
 		const started = Date.now();
 		const result = seedLinkedWorktrees({
-			worktrees: linkedWorktrees(ctx.cwd),
+			worktrees: linkedWorktrees({ cwd: ctx.cwd }),
 			lock: realInitLock,
 			exists: existsSync,
 			sourceBusy: (root) => isInitLocked(root) || codegraphWritingIndex(root),
