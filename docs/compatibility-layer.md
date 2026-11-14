@@ -130,13 +130,18 @@ does not carry is kept as the directory spells it, so a `review-` child is still
 
 The texts follow gentle-shell's own allowlists: the native `codegraph` tool (which can `init`, `query` and `explore`)
 is granted to the orchestrator and the explorer, while the worker, the fix agent, the verifier and both judges hold
-`mcp__codegraph__codegraph_explore` alone, named in full wherever a text names it. No text tells an agent to create or
-refresh an index: that is the extension's job at session start, so a session without one is told to fall back to
-`read`, `grep` and `find`, and verify and the judges are told that the index they read is left alone.
+`mcp__codegraph__codegraph_explore` alone, named in full wherever a text names it. Only the orchestrator and the
+explorer name `query` and `explore`; the other four name the MCP tool, and `generic.md` names no operation because it
+serves a child whose tool is not known. No text tells an agent to create, refresh or locate an index, and none carries
+a no-index fallback: that is the extension's job at session start, so a text says only how to use the tool the role
+holds.
 
-A text is the role's addition to its own agent file, not a replacement for it: the explorer's base file already states
-the gate, the fallback and the index rules, so `explore.md` carries only the delta over it. Only `generic.md` names
-both tool shapes, because it serves a child whose tools are not known.
+Every text opens the same gate: call CodeGraph before you search or read code (`fd`, `find`, `rg`, `grep`, `read`,
+`cat`), and the other tools stay available after that first call. The feature document and the handoff are not code,
+so the gate does not cover them. After the gate each role says what the call is for in its own work: scope and size
+for the orchestrator, following call paths for the explorer, the reach of the edit for the worker, the boundary of a
+finding for the fix agent, interaction probes for the verifier, the blast radius for the judges. The answer is a map,
+never proof.
 
 Each file is read at most once per variant, and a read never throws. A missing, unreadable or heading-less file falls
 back to `generic.md`, and when that cannot be read either the session gets no section rather than a broken prompt.
