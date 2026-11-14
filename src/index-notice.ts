@@ -1,7 +1,7 @@
 import { appendFileSync, existsSync, mkdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
-import { CODEGRAPH_MCP_TOOL, mayInitiateIndexWrite, NATIVE_CODEGRAPH_TOOL, type IndexRole } from "./agents.ts";
+import { codegraphTools, CODEGRAPH_MCP_TOOL, mayInitiateIndexWrite, NATIVE_CODEGRAPH_TOOL, type IndexRole } from "./agents.ts";
 import type { AutoIndexResult, IndexAction, PostInitSyncOutcome } from "./autoindex.ts";
 import type { PerCaseOutcome } from "./prefetch.ts";
 import { SKILL_REMINDER_TYPE } from "./skill-reminder.ts";
@@ -24,12 +24,7 @@ export function findIndexRoot(cwd: string, exists: (path: string) => boolean = e
 }
 
 /** CodeGraph tools among the selected ones; the MCP wildcard stands for the explore tool. */
-export function codegraphTools(selectedTools: readonly string[]): string[] {
-	const tools: string[] = [];
-	if (selectedTools.includes("codegraph")) tools.push("codegraph");
-	if (selectedTools.some((tool) => tool === CODEGRAPH_MCP_TOOL || tool === "mcp__codegraph__*")) tools.push(CODEGRAPH_MCP_TOOL);
-	return tools;
-}
+export { codegraphTools };
 
 /**
  * Tools to consider for the notice. In a subagent child the MCP tools are not in selectedTools yet when

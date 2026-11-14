@@ -1,23 +1,42 @@
 import { spawn } from "node:child_process";
 import { join } from "node:path";
-import { CODEGRAPH_MCP_TOOL } from "./agents.ts";
+import { CHILD_ENV, codegraphTools, COMMAND_TOOLS, FILE_WRITING_TOOLS, NATIVE_CODEGRAPH_TOOL, requestedTools } from "./agents.ts";
 import type { DaemonExploreResult } from "./daemonclient.ts";
 
 export const PREFETCH_MAX_CHARS = 12_000;
 export const QUERY_MAX_CHARS = 300;
 
-const REQUESTED_TOOLS_ENV = "GENTLE_PI_AGENTS_REQUESTED_TOOLS";
-const CHILD_ENV = "GENTLE_PI_AGENTS_CHILD";
-const WRITING_TOOLS = ["bash", "edit", "write", "bash_background"];
+/**
+ * The CodeGraph tools a subagent child declares: the native `codegraph` tool, the MCP explore tool, or both.
+ * The pre-fetch serves all three shapes, and never needs one of them to be there instead of the other.
+ */
+export function explorerCodegraphTools(env: Record<string, string | undefined>): string[] {
+	return codegraphTools(requestedTools(env));
+}
 
 /**
- * gentle-pi gives a subagent child no env var with the agent's name, only its tool list.
- * The explorer is the one child that reads only and holds the CodeGraph MCP tool.
+ * gentle-pi gives a subagent child no env var with the agent's name, only its tool list. The explorer is the
+ * one child that reads only: no command tool, no file-writing tool, and at least one CodeGraph tool. A child
+ * that runs commands (verify, the judges) is another role: it is never pre-fetched for, and it never starts an
+ * index write of its own.
  */
 export function isExplorerChild(env: Record<string, string | undefined>): boolean {
 	if (env[CHILD_ENV] !== "1") return false;
-	const tools = (env[REQUESTED_TOOLS_ENV] ?? "").split(",").map((tool) => tool.trim());
-	return tools.includes(CODEGRAPH_MCP_TOOL) && !tools.some((tool) => WRITING_TOOLS.includes(tool));
+	const tools = requestedTools(env);
+	if (codegraphTools(tools).length === 0) return false;
+	return !tools.some((tool) => COMMAND_TOOLS.includes(tool) || FILE_WRITING_TOOLS.includes(tool));
+}
+
+/** How the pre-fetch names a CodeGraph tool the explorer holds. */
+function toolLabel(tool: string): string {
+	return tool === NATIVE_CODEGRAPH_TOOL ? `the \`${NATIVE_CODEGRAPH_TOOL}\` tool` : `\`${tool}\``;
+}
+
+/** The tools the explorer may call for more, named for the shape it really holds. */
+function moreToolsLabel(tools: readonly string[]): string {
+	const labels = tools.map(toolLabel);
+	if (labels.length === 0) return "CodeGraph";
+	return labels.length === 1 ? labels[0]! : `${labels.slice(0, -1).join(", ")} or ${labels[labels.length - 1]}`;
 }
 
 /**
@@ -109,11 +128,12 @@ export async function prefetchForExplorer(input: PrefetchInput): Promise<string 
 		if (!input.exists(join(input.cwd, ".codegraph"))) return undefined;
 		// A read call while an init builds the index can hang that init for good, so this waits for the next run.
 		if (input.initRunning?.(input.cwd)) return undefined;
+		// The query goes to the daemon of the explorer's own checkout: its worktree's, never its parent's.
 		const output = await input.explore(query, input.cwd);
 		if (output === undefined || output.trim().length === 0) return undefined;
 		return [
-			"CodeGraph pre-fetch for your task, answered by this project's CodeGraph daemon before your first step (bounded in size and time).",
-			`Use it as a starting point and call ${CODEGRAPH_MCP_TOOL} when you need more.`,
+			`CodeGraph pre-fetch for your task, answered by the CodeGraph daemon of ${input.cwd} before your first step (bounded in size and time).`,
+			`Use it as a starting point and call ${moreToolsLabel(explorerCodegraphTools(input.env))} when you need more.`,
 			"",
 			boundOutput(output.trim()),
 		].join("\n");

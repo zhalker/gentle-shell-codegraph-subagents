@@ -2,6 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { join } from "node:path";
 import {
+	PREFETCH_MAX_CHARS,
 	QUERY_MAX_CHARS,
 	boundOutput,
 	isExplorerChild,
@@ -136,4 +137,63 @@ test("S10: a missing or empty task fetches nothing", async () => {
 test("S10: oversized output is cut before it reaches the model", async () => {
 	const text = await prefetchForExplorer(base({ explore: async () => "z".repeat(100_000) }));
 	assert.ok(text !== undefined && text.length < 20_000, `length ${text?.length}`);
+});
+
+// --- S5: the explorer is detected through the native tool, the MCP tool, or both, and always in its own checkout ---
+
+const NATIVE = "codegraph";
+
+test("S5: the explorer is recognised through the native codegraph tool, the MCP tool, or both", () => {
+	const child = (list: string) => ({ GENTLE_PI_AGENTS_CHILD: "1", GENTLE_PI_AGENTS_REQUESTED_TOOLS: list });
+	assert.equal(isExplorerChild(child(`read,grep,find,${MCP}`)), true, "MCP only");
+	assert.equal(isExplorerChild(child(`read,grep,find,${NATIVE}`)), true, "native only");
+	assert.equal(isExplorerChild(child(`read,grep,find,${NATIVE},${MCP}`)), true, "both");
+	assert.equal(isExplorerChild(child("read,grep,find")), false, "no CodeGraph tool at all");
+});
+
+test("S5: the pre-fetch names the CodeGraph tool the explorer really holds", async () => {
+	const run = (list: string) => prefetchForExplorer({
+		env: { GENTLE_PI_AGENTS_CHILD: "1", GENTLE_PI_AGENTS_REQUESTED_TOOLS: list },
+		prompt: "map how session discovery works",
+		cwd: "C:\\project",
+		exists: () => true,
+		explore: async () => "SYMBOLS",
+	});
+	const native = await run(`read,${NATIVE}`);
+	assert.match(String(native), /call the `codegraph` tool when you need more/);
+	assert.doesNotMatch(String(native), new RegExp(MCP), "the explorer does not hold the MCP tool");
+	const both = await run(`read,${NATIVE},${MCP}`);
+	assert.match(String(both), /the `codegraph` tool or `mcp__codegraph__codegraph_explore`/);
+});
+
+test("S5: a read-only role that runs commands (verify, the judges) is never pre-fetched for", async () => {
+	let called = false;
+	const text = await prefetchForExplorer(base({
+		env: { GENTLE_PI_AGENTS_CHILD: "1", GENTLE_PI_AGENTS_REQUESTED_TOOLS: `read,grep,find,bash,${NATIVE},${MCP}` },
+		explore: async () => { called = true; return "X"; },
+	}));
+	assert.equal(text, undefined);
+	assert.equal(called, false);
+});
+
+test("S5: the pre-fetch asks the daemon of the explorer's own checkout, never its parent's", async () => {
+	const child = join("C:", "repo", "wt");
+	const parent = join("C:", "repo");
+	const asked: string[] = [];
+	const text = await prefetchForExplorer(base({
+		env: { GENTLE_PI_AGENTS_CHILD: "1", GENTLE_PI_AGENTS_REQUESTED_TOOLS: `read,${NATIVE}` },
+		cwd: child,
+		exists: (path) => path === join(child, ".codegraph") || path === join(parent, ".codegraph"),
+		explore: async (_query, cwd) => { asked.push(cwd); return "SYMBOLS"; },
+	}));
+	assert.deepEqual(asked, [child]);
+	assert.match(String(text), new RegExp(`daemon of ${child.replace(/\\/g, "\\\\")}`));
+});
+
+test("S5: the pre-fetch keeps its existing bounds", async () => {
+	assert.equal(PREFETCH_MAX_CHARS, 12_000);
+	const { DAEMON_PREFETCH_TIMEOUT_MS } = await import("../src/prefetch.ts");
+	assert.equal(DAEMON_PREFETCH_TIMEOUT_MS, 10_000);
+	const text = await prefetchForExplorer(base({ explore: async () => "z".repeat(50_000) }));
+	assert.ok(text !== undefined && text.length <= PREFETCH_MAX_CHARS + 1_000, `length ${text?.length}`);
 });
