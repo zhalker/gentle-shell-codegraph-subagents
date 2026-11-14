@@ -92,7 +92,7 @@ export interface SyncCoordinator {
 }
 
 /** An existing index is synced; a fresh git project with a marker file is initialised; anything else is left alone. */
-export function planIndexAction(cwd: string, exists: (path: string) => boolean): IndexAction {
+export function planIndexAction(cwd: string, exists: (path: string) => boolean): Exclude<IndexAction, "seed"> {
 	if (exists(join(cwd, ".codegraph"))) return "sync";
 	if (exists(join(cwd, ".git")) && INIT_PROJECT_MARKERS.some((marker) => exists(join(cwd, marker)))) return "init";
 	return "none";
