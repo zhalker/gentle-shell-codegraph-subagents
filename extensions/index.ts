@@ -136,17 +136,18 @@ export default function (pi: ExtensionAPI) {
 	// never makes the call fail: Pi catches a throwing handler (extensions.md, tool_result).
 	pi.on("tool_result", async (event, ctx) => {
 		try {
-			const decision = initHookDecision(event, sessionIndexRole(process.env));
+			const role = sessionIndexRole(process.env);
+			const decision = initHookDecision(event, role);
 			if (decision === "skip-not-a-native-init" || decision === "skip-failed-init") return undefined;
 			const outcome = decision === "skip-read-only"
-				? "skipped-read-only" as const
+				? ("skipped-read-only" as const)
 				: await syncAfterNativeInit({
 					cwd: ctx.cwd,
 					exists: existsSync,
 					lock: realInitLock,
 					sync: realSyncLock,
 					run: runCodegraph,
-					role: sessionIndexRole(process.env),
+					role,
 					log: (entry) => logSync(entry),
 				});
 			return { content: [...event.content, { type: "text" as const, text: postInitSyncNotice(outcome) }] };
