@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
 import { copyFileSync } from "node:fs";
 import { join } from "node:path";
-import { mayInitiateIndexWrite, type IndexRole } from "./agents.ts";
+import { mayInitiateIndexWrite, sessionIndexRole } from "./agents.ts";
 import { codegraphWritingIndex, type InitLock } from "./initlock.ts";
 import { killTree } from "./prefetch.ts";
 import { projectArgument } from "./daemonclient.ts";
@@ -129,10 +129,12 @@ function skipsSession(input: Pick<AutoIndexInput, "cwd" | "env" | "reason" | "ex
  * orchestrator hands out `workspace_root`). There it does the same background work a fresh session would:
  * seed its own index from the main checkout's, or initialise one. Everywhere else a child keeps skipping:
  * it shares the parent's cwd, and the parent already did the work — a child never starts an index for the
- * parent's own project.
+ * parent's own project. A read-only role (verify, the judges) starts no index write anywhere, whatever
+ * directory it was handed.
  */
 function childWorktreeNeedsIndex(input: Pick<AutoIndexInput, "cwd" | "env" | "exists">): boolean {
 	if (input.env[CHILD_ENV] !== "1") return false;
+	if (!mayInitiateIndexWrite(sessionIndexRole(input.env))) return false;
 	if (!worktreeOf(input.cwd).worktree) return false;
 	if (input.exists(join(input.cwd, ".codegraph"))) return false;
 	const action = worktreeIndexAction(input.cwd, input.exists).action;

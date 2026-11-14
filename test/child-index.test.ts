@@ -91,3 +91,25 @@ test("S-T6: a subagent child in a plain directory without a marker creates nothi
 	});
 	assert.deepEqual(result, { action: "none", ok: true });
 });
+
+test("S6: a read-only role handed an unindexed worktree starts no init and no sync", async (t) => {
+	const { repo, worktree, base } = realWorktree();
+	cleanup(t, base);
+	mkdirSync(join(repo, ".codegraph"));
+	writeFileSync(join(repo, ".codegraph", "codegraph.db"), "seed bytes");
+	const runs: string[][] = [];
+	let copied = false;
+	const result = await autoIndex({
+		// verify and the judges: they run commands but write no file, and they never start an index write.
+		cwd: worktree,
+		env: { GENTLE_PI_AGENTS_CHILD: "1", GENTLE_PI_AGENTS_REQUESTED_TOOLS: "read,grep,find,bash,mcp__codegraph__codegraph_explore" },
+		reason: "new",
+		exists: existsSync,
+		run: async (args) => { runs.push(args); return true; },
+		copySeed: () => { copied = true; return true; },
+	});
+	assert.deepEqual(result, { action: "none", ok: true });
+	assert.deepEqual(runs, []);
+	assert.equal(copied, false, "nothing was copied into the worktree");
+	assert.equal(existsSync(join(worktree, ".codegraph")), false);
+});

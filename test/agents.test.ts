@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { CODEGRAPH_MCP_TOOL, normalizeAgent } from "../src/agents.ts";
+import { CODEGRAPH_MCP_TOOL, indexRole, mayInitiateIndexWrite, normalizeAgent, sessionIndexRole } from "../src/agents.ts";
 
 const TOOL_BLOCK = `<!-- gentle-ai:pi-codegraph-tool -->
 Use the Pi MCP proxy tool \`mcp\` for the read-only CodeGraph server.
@@ -177,4 +177,41 @@ test("S2: a frozen explorer keeps every shipped instruction line verbatim", () =
 	const output = normalizeAgent(agent("gentle-ai-explore", "tools: read, grep, find, codegraph", `${EXPLORER_BODY}${BLOCKS}`));
 	for (const line of EXPLORER_BODY.split("\n").filter(Boolean)) assert.ok(output.includes(line), line);
 	assert.equal(normalizeAgent(output), output);
+});
+
+// --- S6: role rules from the declared tool list ---
+
+test("S6: role detection reads the tool list gentle-pi requested, not an agent name", () => {
+	assert.equal(indexRole(["read", "grep", "find", "codegraph"]), "explorer");
+	assert.equal(indexRole(["read", "grep", "find", "mcp__codegraph__codegraph_explore"]), "explorer");
+	assert.equal(indexRole(["read", "grep", "find", "bash", "mcp__codegraph__codegraph_explore"]), "read-only");
+	assert.equal(indexRole(["read", "grep", "find", "bash", "edit", "mcp__codegraph__codegraph_explore"]), "writer");
+	assert.equal(indexRole(["read", "grep", "find"]), "unknown");
+	assert.equal(indexRole([]), "unknown");
+});
+
+test("S6: only a read-only role is barred from starting an index write", () => {
+	assert.equal(mayInitiateIndexWrite("read-only"), false);
+	for (const role of ["explorer", "writer", "unknown", undefined] as const) {
+		assert.equal(mayInitiateIndexWrite(role), true, String(role));
+	}
+});
+
+test("S6: the main session is not a subagent role, so no rule narrows it", () => {
+	assert.equal(sessionIndexRole({}), undefined);
+	assert.equal(sessionIndexRole({ GENTLE_PI_AGENTS_CHILD: "0", GENTLE_PI_AGENTS_REQUESTED_TOOLS: "read" }), undefined);
+	assert.equal(sessionIndexRole({ GENTLE_PI_AGENTS_CHILD: "1", GENTLE_PI_AGENTS_REQUESTED_TOOLS: "read,bash" }), "read-only");
+	assert.equal(sessionIndexRole({ GENTLE_PI_AGENTS_CHILD: "1", GENTLE_PI_AGENTS_REQUESTED_TOOLS: "read,codegraph" }), "explorer");
+});
+
+test("S6: the package never adds the native codegraph tool to a read-only role", () => {
+	// verify and both judges get the exploring MCP tool only; the native tool can init, so it is never added.
+	for (const name of ["gentle-ai-verify", "jd-judge-a", "jd-judge-b"]) {
+		const out = normalizeAgent(agent(name, "tools: read, grep, find, bash", `Body.${BLOCKS}`));
+		assert.deepEqual(toolsOf(out), ["read", "grep", "find", "bash", CODEGRAPH_MCP_TOOL], name);
+		assert.ok(!toolsOf(out).includes("codegraph"), name);
+	}
+	// The explorer keeps the native tool it declares: its own body allows it to create the workspace index.
+	const explorer = normalizeAgent(agent("gentle-ai-explore", "tools: read, grep, find, codegraph", `Body.${BLOCKS}`));
+	assert.deepEqual(toolsOf(explorer), ["read", "grep", "find", "codegraph", CODEGRAPH_MCP_TOOL]);
 });
