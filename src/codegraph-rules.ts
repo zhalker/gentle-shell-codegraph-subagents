@@ -1,39 +1,124 @@
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { codegraphTools } from "./agents.ts";
 
-// S2/S3: one generic CodeGraph rule for every session that can call CodeGraph (the orchestrator and the
-// subagents, except the reviewers). It rides `systemPromptOptions.appendSystemPrompt` and is never returned as a
-// replacement prompt: a replacement is dropped by some hosts and would erase the harness's own text. The heading
-// is the identity of the block, so a section that is already there is never added twice.
+// S1/S2/S5: the approved wording of the rule lives in one Markdown file per role under `src/codegraph-rules/`, so
+// it can be read and edited without touching code, and each session gets the text of its own role: the primary
+// session's (the orchestrator), a gentle-shell agent's, or the generic text for any other child and for a file that
+// cannot be read. The section rides `systemPromptOptions.appendSystemPrompt` and is never returned as a replacement
+// prompt: a replacement is dropped by some hosts and would erase the harness's own text. The heading is the identity
+// of the block, so a section that is already there is never added twice.
 
 export const SECTION_MARKER = "## CodeGraph";
 
-/** The three-bullet block recovered from the `codegraph-native` worktree's orchestrator and explorer assets. */
-export const RULE_BULLETS: readonly string[] = [
-	"- For structural questions — where something is defined, who calls it, how a flow works — use the cwd-scoped `codegraph` tool before symbol searches with `rg` or `grep` and before broad `find`. The same applies when the work is a refactor, a review, an analysis or a fix. `query` finds symbols; `explore` returns source plus call paths. Run `operation: \"init\"` first when the index is needed: it creates `.codegraph/` when absent and updates it when present. Never ask it to target another path.",
-	"- `codegraph` may create or update only the current workspace `.codegraph/` index. This is the sole permitted mutation; all tracked files, source files, and other project content remain read-only.",
-	"- If CodeGraph reports that it is unavailable or fails, then use `read`, `grep`, and `find` as the fallback. Do not use that fallback before CodeGraph is unavailable or fails.",
-];
+/** The seven approved texts, one per role; each is `<variant>.md` in `src/codegraph-rules/`. */
+export const RULE_VARIANTS = ["orchestrator", "explore", "verify", "worker", "fix", "judge", "generic"] as const;
 
-export interface CodegraphSectionInput {
+export type RuleVariant = (typeof RULE_VARIANTS)[number];
+
+/** S2: the agent name → text table. Both judges share one text, and the reviewers have none at all (S3). */
+export const RULE_VARIANT_BY_AGENT: Readonly<Record<string, RuleVariant>> = {
+	"gentle-ai-explore": "explore",
+	"gentle-ai-verify": "verify",
+	"gentle-ai-worker": "worker",
+	"jd-fix-agent": "fix",
+	"jd-judge-a": "judge",
+	"jd-judge-b": "judge",
+};
+
+/** Which session a selection is made for: the agent name read from a child's own argv, and whether it is a child. */
+export interface RuleSession {
+	/** The agent name from the child's own command line; absent when it could not be read. */
+	agent?: string | undefined;
+	/** Whether this session is a subagent child at all. A primary session gets the orchestrator text. */
+	child?: boolean | undefined;
+}
+
+/**
+ * S2: the text of one session. A primary session gets the orchestrator's, a named gentle-shell agent its own, and
+ * any other child — one whose name the table does not carry, or whose name could not be read at all — the generic
+ * text, which is also the text of a subagent outside gentle-ai.
+ */
+export function ruleVariant(session: RuleSession | undefined): RuleVariant {
+	if (session?.child !== true) return "orchestrator";
+	const agent = session.agent;
+	if (typeof agent !== "string" || agent.length === 0) return "generic";
+	return RULE_VARIANT_BY_AGENT[agent] ?? "generic";
+}
+
+/** S3: a reviewer is named `review-*`; it gets no section whatever tools it holds. */
+export function isReviewerAgent(agent: string | undefined): boolean {
+	return typeof agent === "string" && agent.startsWith("review-");
+}
+
+/** S1: how one rule file is read. The default is the real file system, as UTF-8 text. */
+export type RuleReader = (file: string) => string;
+
+/** The directory holding the seven texts, next to this module; `package.json` ships all of `src`. */
+export const RULE_DIRECTORY = fileURLToPath(new URL("./codegraph-rules/", import.meta.url));
+
+/** The shipped text of one variant, or `undefined` when it cannot be used; never throws. */
+export type RuleTexts = (variant: RuleVariant) => string | undefined;
+
+function readRuleFile(file: string): string {
+	return readFileSync(file, "utf8");
+}
+
+/**
+ * S2: the texts of one run, each file read at most once and never throwing. A file that cannot be read — missing,
+ * unreadable, or not opening with the heading — gives the generic text, so a broken install still leaves the
+ * session its rule; a generic text that cannot be read either gives `undefined`, which is no section at all rather
+ * than a broken session.
+ */
+export function createRuleTexts(read: RuleReader = readRuleFile, directory: string = RULE_DIRECTORY): RuleTexts {
+	const cache = new Map<RuleVariant, string | undefined>();
+	const load = (variant: RuleVariant): string | undefined => {
+		try {
+			const text = read(join(directory, `${variant}.md`)).trimEnd();
+			if (text.startsWith(SECTION_MARKER)) return text;
+		} catch {
+			// The fallback below is the whole handling: the session never sees this failure.
+		}
+		return variant === "generic" ? undefined : text("generic");
+	};
+	const text = (variant: RuleVariant): string | undefined => {
+		if (cache.has(variant)) return cache.get(variant);
+		const loaded = load(variant);
+		cache.set(variant, loaded);
+		return loaded;
+	};
+	return text;
+}
+
+/** The one cache of this process: the approved texts ship with the package and do not change under a run. */
+const defaultRuleTexts: RuleTexts = createRuleTexts();
+
+export interface CodegraphSectionInput extends RuleSession {
 	/** The session's tools: the selected ones plus, for a child, the ones gentle-pi requested for it. */
 	tools: readonly string[];
 	/** The nearest directory holding `.codegraph/codegraph.db`: the checkout has an index. */
 	root?: string;
+	/** The variant texts; the default reads each file of `RULE_DIRECTORY` once and keeps it. */
+	rules?: RuleTexts;
 }
 
 /**
- * The system-prompt section for a session whose tools include the native `codegraph` tool or the MCP explore
- * tool; `undefined` for a session holding neither, which is how a reviewer stays out. When the checkout has an
- * index, one line inside the section says so instead of a separate notice.
+ * The system-prompt section of this session's role: the approved text of that variant, plus one line when the
+ * checkout has an index. `undefined` — no section — for a session whose tools include neither the native `codegraph`
+ * tool nor the MCP explore tool, for a reviewer, and for a text that cannot be read.
  */
 export function codegraphSection(input: CodegraphSectionInput): string | undefined {
 	if (!Array.isArray(input?.tools)) return undefined;
+	if (isReviewerAgent(input.agent)) return undefined;
 	if (codegraphTools(input.tools).length === 0) return undefined;
-	const lines = [SECTION_MARKER, "", ...RULE_BULLETS];
+	const text = (input.rules ?? defaultRuleTexts)(ruleVariant(input));
+	if (typeof text !== "string" || text.length === 0) return undefined;
+	const lines = [text];
 	if (typeof input.root === "string" && input.root.length > 0) {
 		lines.push(`- This workspace HAS a CodeGraph index at ${input.root}; the extension verified that \`.codegraph/codegraph.db\` exists.`);
 	}
-	return lines.join("\n");
+	return lines.join("\n\n");
 }
 
 /** The part of Pi's `before_agent_start` event this hook reads and mutates. */

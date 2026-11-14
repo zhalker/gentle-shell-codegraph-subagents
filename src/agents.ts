@@ -10,6 +10,49 @@ export const WORKER_MARKER = "<!-- codegraph-workflow:worker -->";
 export const CHILD_ENV = "GENTLE_PI_AGENTS_CHILD";
 export const REQUESTED_TOOLS_ENV = "GENTLE_PI_AGENTS_REQUESTED_TOOLS";
 
+/**
+ * gentle-pi hands a child its agent body as `<tmpdir>/gentle-pi-subagent-<agent>-<random>/instructions.md` after
+ * `--append-system-prompt`, so the child's own command line is where its agent name is readable.
+ */
+export const SUBAGENT_DIR_PREFIX = "gentle-pi-subagent-";
+
+/**
+ * The gentle-shell agents the CodeGraph rule has a text of its own for (both judges share one). The random suffix
+ * gentle-pi appends to the directory could otherwise be read as part of the name, so these names are what cuts
+ * the name out; a name this list does not carry is kept as the directory spells it.
+ */
+export const RULE_AGENT_NAMES: readonly string[] = [
+	"gentle-ai-explore",
+	"gentle-ai-verify",
+	"gentle-ai-worker",
+	"jd-fix-agent",
+	"jd-judge-a",
+	"jd-judge-b",
+];
+
+/**
+ * The agent name of a subagent child, read from its own argv: `undefined` in the primary session, which carries no
+ * such directory. An unrecognised agent keeps the directory's spelling, so a `review-` child is still recognised by
+ * its prefix. An argument that is not a string is skipped, and this never throws.
+ */
+export function agentNameFromArgv(argv: readonly string[] | undefined): string | undefined {
+	if (!Array.isArray(argv)) return undefined;
+	for (const arg of argv) {
+		if (typeof arg !== "string") continue;
+		const at = arg.lastIndexOf(SUBAGENT_DIR_PREFIX);
+		if (at < 0) continue;
+		const rest = arg.slice(at + SUBAGENT_DIR_PREFIX.length);
+		const end = rest.search(/[\\/]/);
+		const directory = (end < 0 ? rest : rest.slice(0, end)).trim();
+		if (directory.length === 0) continue;
+		for (const name of RULE_AGENT_NAMES) {
+			if (directory === name || directory.startsWith(`${name}-`)) return name;
+		}
+		return directory;
+	}
+	return undefined;
+}
+
 /** Tools that write a file of the project: a role holding one of them may write the index too. */
 export const FILE_WRITING_TOOLS: readonly string[] = ["edit", "write", "bash_background"];
 
