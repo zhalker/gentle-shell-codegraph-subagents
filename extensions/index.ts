@@ -3,7 +3,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { getAgentDir, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
-import { applyCodegraphSubagents, readExposureWarning, readMissingServerWarning } from "../src/apply.ts";
+import { readExposureWarning, readMissingServerWarning } from "../src/apply.ts";
 import { sessionIndexRole } from "../src/agents.ts";
 import { linkedWorktrees, prepareProject, runCodegraph, seedLinkedWorktrees, syncAfterNativeInit, type SessionStartReason } from "../src/autoindex.ts";
 import { compactionSync, realSyncLock } from "../src/compaction-sync.ts";
@@ -84,8 +84,6 @@ function seedSessionWorktrees(ctx: ExtensionContext): void {
 	}).catch(() => {});
 }
 
-// Reapplied on every session start so a reinstall (pi install, gentle-shell install)
-// or a gentle-ai sync that rewrote the agent files is corrected on the next launch.
 export default function (pi: ExtensionAPI) {
 	let firstPromptSeen = false;
 	// Runs at load, before gentle-pi's own startup install: a frozen agent file is moved aside here, so that
@@ -171,11 +169,10 @@ export default function (pi: ExtensionAPI) {
 			if (typeof unsubscribeWorktreeEvent === "function") pi.on("session_shutdown", () => unsubscribeWorktreeEvent());
 		} catch { /* without the bus the scan at session start still covers every worktree it sees */ }
 		try {
-			const { changed, errors } = applyCodegraphSubagents(getAgentDir());
-			if (!ctx.hasUI) return;
-			if (changed.length > 0) ctx.ui.notify(`gentle-shell-codegraph-subagents: updated ${changed.length} file(s)`, "info");
+			// No agent file and no mcp.json is written: gentle-pi ships the CodeGraph MCP tool, and these two reads
+			// only warn when the shipped tool cannot be reached in the current configuration.
 			notifyRepair(ctx, loadRepair);
-			if (errors.length > 0) ctx.ui.notify(`gentle-shell-codegraph-subagents: ${errors.length} file(s) skipped: ${errors[0]}`, "warning");
+			if (!ctx.hasUI) return;
 			const registered = pi.getMcpServers?.().some((server) => server.name === "codegraph") ?? false;
 			if (process.env.GENTLE_PI_AGENTS_CHILD !== "1" && readMissingServerWarning(getAgentDir(), ctx.cwd, ctx.isProjectTrusted(), registered)) {
 				ctx.ui.notify("gentle-shell-codegraph-subagents: CodeGraph MCP server was not found in the current configuration. Subagents may not have direct access; configure the server to enable it.", "warning");

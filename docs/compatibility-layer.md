@@ -15,7 +15,13 @@ in plain words instead of being left to guesswork.
 | Prepare the index of the checkout a session acts on (create or sync) | Index a directory it was not pointed at, or use a parent checkout's index or daemon for a worktree |
 | Resolve the daemon of that checkout, reusing a live registered one | Treat an MCP server entry as evidence that a daemon is reachable, rewrite `mcp.json`, or kill a daemon it did not start |
 | Report `completed`, `pending`, `skipped`, `failed` honestly in notices and logs | Call a queued, joined, coalesced or failed request a synced index |
-| Keep verify and the judges out of every index write | Strip a tool a user added to an agent file, or add the native tool to a read-only role |
+| Keep verify and the judges out of every index write | Edit an agent file, strip a tool a user added, or add the native tool to a read-only role |
+
+Agent files and `mcp.json` are never written. gentle-shell ships `mcp__codegraph__codegraph_explore` in the
+explorer, verifier, worker, fix agent and both judges itself, so there is nothing to patch; the extension reads
+`mcp.json` only to warn when the shipped tool is not visible. The frozen normalizers in `src/legacy-agents.ts` are
+used to recognise a file an older version wrote, never to write one, and the repair only renames a file back to
+gentle-pi.
 
 ## Index preparation: create or sync, always coordinated
 
@@ -105,16 +111,17 @@ The child's role is read from the tool list gentle-pi requested for it (a subage
 | nothing recognisable | unknown | yes (behaves as before) |
 
 The main session is not a subagent role and is never narrowed. A read-only role starts no `init` and no `sync` in
-any directory, is never pre-fetched for, and the package adds only the exploring MCP tool to its agent file — never
-the native tool, which can `init`. Navigation is not proof: a CodeGraph answer says what the index held when it was
+any directory, is never pre-fetched for, and no agent file is edited: gentle-shell ships the exploring MCP tool to
+that role and never the native tool, which can `init`. Navigation is not proof: a CodeGraph answer says what the index held when it was
 read, so results are treated as hints to verify against source, and no notice calls an unconfirmed index current.
 
 ## What the tests pin
 
 `test/index-coordination.test.ts`, `test/init-hook.test.ts`, `test/daemonclient.test.ts`, `test/warmup.test.ts`,
-`test/prefetch.test.ts`, `test/agents.test.ts`, `test/child-index.test.ts` and `test/index-notice.test.ts` cover:
-the create-or-sync decision, the coordinated/unavailable/pending paths, all post-init outcomes including the
-no-sync-after-failure rule, daemon resolution per checkout with and without MCP configuration, explorer detection
-through the native tool and through MCP, a worktree versus its parent checkout, and the read-only role rule. No test
+`test/prefetch.test.ts`, `test/agents.test.ts`, `test/apply.test.ts`, `test/child-index.test.ts` and
+`test/index-notice.test.ts` cover: the create-or-sync decision, the coordinated/unavailable/pending paths, all
+post-init outcomes including the no-sync-after-failure rule, daemon resolution per checkout with and without MCP
+configuration, explorer detection through the native tool and through MCP, a worktree versus its parent checkout,
+the read-only role rule, and the two read-only `mcp.json` warnings (missing server, unavailable exposure). No test
 spawns a real `codegraph`, `git` or network call; runners are injected and scratch state lives under the system temp
 directory.

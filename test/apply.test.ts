@@ -1,184 +1,59 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { spawn } from "node:child_process";
-import { applyCodegraphSubagents, readExposureWarning, readMissingServerWarning } from "../src/apply.ts";
-import { CODEGRAPH_MCP_TOOL } from "../src/agents.ts";
+import * as apply from "../src/apply.ts";
 
-const VERIFY = `---\nname: gentle-ai-verify\ndescription: v\ntools: read, bash, mcp\n---\n\nYou verify.\n\n<!-- gentle-ai:pi-codegraph-tool -->\nUse the Pi MCP proxy tool \`mcp\`.\n<!-- /gentle-ai:pi-codegraph -->\n`;
-const REVIEW = `---\nname: review-risk\ndescription: r\ntools:\n  - read\n  - mcp\n---\n\nYou review.\n\n<!-- gentle-ai:pi-codegraph-guidance -->\n## CodeGraph\n<!-- /gentle-ai:pi-codegraph -->\n`;
-// A file gentle-ai never touched: it must come out byte for byte, or gentle-pi stops updating it.
-const PLAIN = `---\nname: gentle-ai-worker\ndescription: w\ntools: read, bash\n---\n\nYou work.\n`;
-const MCP = JSON.stringify({ mcpServers: { codegraph: { command: "codegraph" } } }, null, 2) + "\n";
+const { readExposureWarning, readMissingServerWarning } = apply;
 
-function setup(): string {
-	const dir = mkdtempSync(join(tmpdir(), "pcs-"));
-	mkdirSync(join(dir, "agents"));
-	mkdirSync(join(dir, "subagents"));
-	writeFileSync(join(dir, "agents", "gentle-ai-verify.md"), VERIFY);
-	writeFileSync(join(dir, "subagents", "review-risk.md"), REVIEW);
-	writeFileSync(join(dir, "agents", "gentle-ai-worker.md"), PLAIN);
-	writeFileSync(join(dir, "mcp.json"), MCP);
+// A global configuration that really exposes the shipped explore tool.
+const DIRECT = JSON.stringify({ mcpServers: { codegraph: { command: "codegraph", toolExposure: { codegraph_explore: "direct" } } } }, null, 2) + "\n";
+
+function agentDir(globalConfig?: string): string {
+	const dir = mkdtempSync(join(tmpdir(), "pcs-agent-"));
+	if (globalConfig !== undefined) writeFileSync(join(dir, "mcp.json"), globalConfig);
 	return dir;
 }
 
-test("S7: rewrites agent files in agents/ and subagents/ and the mcp.json, and reports them", () => {
-	const dir = setup();
-	const result = applyCodegraphSubagents(dir);
-	assert.deepEqual(result.errors, []);
-	assert.equal(result.changed.length, 4); // verify (blocks), review-risk (blocks), mcp.json, and the block-free worker missing the tool
-	const verify = readFileSync(join(dir, "agents", "gentle-ai-verify.md"), "utf8");
-	assert.ok(verify.includes(`tools: read, bash, ${CODEGRAPH_MCP_TOOL}`));
-	assert.ok(!verify.includes("gentle-ai:pi-codegraph"));
-	assert.ok(!readFileSync(join(dir, "subagents", "review-risk.md"), "utf8").includes("- mcp"));
-	assert.equal(JSON.parse(readFileSync(join(dir, "mcp.json"), "utf8")).mcpServers.codegraph.toolExposure.codegraph_explore, "direct");
-});
+function projectDir(config?: string): string {
+	const dir = mkdtempSync(join(tmpdir(), "pcs-project-"));
+	if (config !== undefined) {
+		mkdirSync(join(dir, ".pi"));
+		writeFileSync(join(dir, ".pi", "mcp.json"), config);
+	}
+	return dir;
+}
 
-test("S3: a block-free agent of the six without the MCP tool gets exactly that tool added, nothing else", () => {
-	const dir = setup();
-	const result = applyCodegraphSubagents(dir);
-	const worker = readFileSync(join(dir, "agents", "gentle-ai-worker.md"), "utf8");
-	assert.equal(worker, `---\nname: gentle-ai-worker\ndescription: w\ntools: read, bash, ${CODEGRAPH_MCP_TOOL}\n---\n\nYou work.\n`);
-	assert.ok(result.changed.includes(join(dir, "agents", "gentle-ai-worker.md")));
-	assert.equal(existsSync(join(dir, "agents", "gentle-ai-worker.md.pre-codegraph-subagents.bak")), true);
-});
-
-test("S3: a block-free agent of the six that already carries the MCP tool is left byte for byte", () => {
-	const dir = setup();
-	const withTool = `---\nname: gentle-ai-worker\ndescription: w\ntools: read, bash, ${CODEGRAPH_MCP_TOOL}\n---\n\nYou work.\n`;
-	writeFileSync(join(dir, "agents", "gentle-ai-worker.md"), withTool);
-	const result = applyCodegraphSubagents(dir);
-	assert.equal(readFileSync(join(dir, "agents", "gentle-ai-worker.md"), "utf8"), withTool);
-	assert.equal(result.changed.includes(join(dir, "agents", "gentle-ai-worker.md")), false);
-	assert.equal(existsSync(join(dir, "agents", "gentle-ai-worker.md.pre-codegraph-subagents.bak")), false);
-});
-
-test("S3: a block-free agent outside the six is left byte for byte, with no backup and no report", () => {
-	const dir = setup();
-	const outsider = `---\nname: some-other-agent\ndescription: o\ntools: read, bash\n---\n\nOther agent.\n`;
-	writeFileSync(join(dir, "agents", "some-other-agent.md"), outsider);
-	applyCodegraphSubagents(dir);
-	assert.equal(readFileSync(join(dir, "agents", "some-other-agent.md"), "utf8"), outsider);
-	assert.equal(existsSync(join(dir, "agents", "some-other-agent.md.pre-codegraph-subagents.bak")), false);
-});
-
-test("S7: a second run changes and writes nothing", () => {
-	const dir = setup();
-	applyCodegraphSubagents(dir);
-	const before = readdirSync(join(dir, "agents")).sort();
-	const again = applyCodegraphSubagents(dir);
-	assert.deepEqual(again, { changed: [], errors: [] });
-	assert.deepEqual(readdirSync(join(dir, "agents")).sort(), before);
-});
-
-test("the first rewrite keeps a backup of the original and later rewrites never replace it", () => {
-	const dir = setup();
-	applyCodegraphSubagents(dir);
-	const backup = join(dir, "agents", "gentle-ai-verify.md.pre-codegraph-subagents.bak");
-	assert.equal(readFileSync(backup, "utf8"), VERIFY);
-	writeFileSync(join(dir, "agents", "gentle-ai-verify.md"), VERIFY.replace("You verify.", "You verify again."));
-	applyCodegraphSubagents(dir);
-	assert.equal(readFileSync(backup, "utf8"), VERIFY);
-	assert.equal(readFileSync(join(dir, "mcp.json.pre-codegraph-subagents.bak"), "utf8"), MCP);
-});
-
-test("backups are not picked up as agent definitions and files that do not end in .md are ignored", () => {
-	const dir = setup();
-	writeFileSync(join(dir, "agents", "notes.txt"), VERIFY);
-	applyCodegraphSubagents(dir);
-	assert.equal(readFileSync(join(dir, "agents", "notes.txt"), "utf8"), VERIFY);
-	const second = applyCodegraphSubagents(dir);
-	assert.deepEqual(second.changed, []);
+// The writer is gone: these two reads are the whole module, so nothing here can edit an agent file or mcp.json.
+test("the package no longer writes agent files or mcp.json: apply exposes only its two read-only warnings", () => {
+	assert.deepEqual(Object.keys(apply).sort(), ["readExposureWarning", "readMissingServerWarning"]);
 });
 
 test("S19: exposure warning reads global and trusted project settings without changing them", () => {
-	const dir = setup();
-	const project = mkdtempSync(join(tmpdir(), "pcs-project-"));
-	mkdirSync(join(project, ".pi"));
-	const config = JSON.stringify({ mcpServers: { codegraph: { toolExposure: { codegraph_explore: "hidden" } } } });
-	writeFileSync(join(project, ".pi", "mcp.json"), config);
-	applyCodegraphSubagents(dir);
+	const dir = agentDir(DIRECT);
+	const project = projectDir(JSON.stringify({ mcpServers: { codegraph: { toolExposure: { codegraph_explore: "hidden" } } } }));
+	const config = readFileSync(join(project, ".pi", "mcp.json"), "utf8");
 	assert.equal(readExposureWarning(dir, project, false), undefined);
 	assert.equal(readExposureWarning(dir, project, true), "hidden");
 	assert.equal(readFileSync(join(project, ".pi", "mcp.json"), "utf8"), config);
 });
 
 test("S19: a trusted project hiding the server warns when the global direct exception remains", () => {
-	const dir = setup();
-	const project = mkdtempSync(join(tmpdir(), "pcs-project-"));
-	mkdirSync(join(project, ".pi"));
-	const config = JSON.stringify({ mcpServers: { codegraph: { exposure: "hidden" } } });
-	writeFileSync(join(project, ".pi", "mcp.json"), config);
-	applyCodegraphSubagents(dir);
+	const dir = agentDir(DIRECT);
+	const project = projectDir(JSON.stringify({ mcpServers: { codegraph: { exposure: "hidden" } } }));
+	const config = readFileSync(join(project, ".pi", "mcp.json"), "utf8");
 	assert.equal(readExposureWarning(dir, project, true), "hidden-with-direct");
 	assert.equal(readFileSync(join(project, ".pi", "mcp.json"), "utf8"), config);
 });
 
 test("S21: a missing server is reported without creating a config; untrusted projects are ignored", () => {
-	const dir = mkdtempSync(join(tmpdir(), "pcs-agent-"));
-	const project = mkdtempSync(join(tmpdir(), "pcs-project-"));
-	mkdirSync(join(project, ".pi"));
-	const config = JSON.stringify({ mcpServers: { codegraph: { command: "codegraph" } } });
-	writeFileSync(join(project, ".pi", "mcp.json"), config);
+	const dir = agentDir();
+	const project = projectDir(JSON.stringify({ mcpServers: { codegraph: { command: "codegraph" } } }));
+	const config = readFileSync(join(project, ".pi", "mcp.json"), "utf8");
 	assert.equal(readMissingServerWarning(dir, project, false), true);
 	assert.equal(readMissingServerWarning(dir, project, true), false);
 	assert.equal(readMissingServerWarning(dir, project, false, true), false);
 	assert.equal(existsSync(join(dir, "mcp.json")), false);
 	assert.equal(readFileSync(join(project, ".pi", "mcp.json"), "utf8"), config);
-});
-
-test("a missing agent directory is not an error", () => {
-	const dir = mkdtempSync(join(tmpdir(), "pcs-empty-"));
-	assert.deepEqual(applyCodegraphSubagents(dir), { changed: [], errors: [] });
-	assert.deepEqual(applyCodegraphSubagents(join(dir, "does-not-exist")), { changed: [], errors: [] });
-});
-
-test("a file that cannot be read is reported and the other files are still processed", () => {
-	const dir = setup();
-	mkdirSync(join(dir, "agents", "broken.md"));
-	const result = applyCodegraphSubagents(dir);
-	assert.equal(result.errors.length, 1);
-	assert.ok(result.errors[0].includes("broken.md"));
-	assert.equal(result.changed.length, 4);
-	assert.ok(existsSync(join(dir, "mcp.json.pre-codegraph-subagents.bak")));
-});
-
-function sessionApplying(dir: string, startAt: number): Promise<{ changed: string[]; errors: string[] }> {
-	return new Promise((resolve) => {
-		const child = spawn(process.execPath, [join(import.meta.dirname, "apply-worker.ts"), dir, String(startAt)], { stdio: ["ignore", "pipe", "ignore"] });
-		let out = "";
-		child.stdout.on("data", (chunk) => (out += chunk));
-		child.on("close", () => {
-			try { resolve(JSON.parse(out)); } catch { resolve({ changed: [], errors: [`worker produced no result: ${out.slice(0, 80)}`] }); }
-		});
-	});
-}
-
-function manyAgentsDir(): { dir: string; names: string[]; originals: Record<string, string> } {
-	const dir = setup();
-	for (let i = 0; i < 6; i++) writeFileSync(join(dir, "agents", `gentle-ai-verify${i}.md`), VERIFY);
-	// The untouched file is not rewritten and gets no backup, so it is not part of the concurrent rewrites.
-	const names = [...readdirSync(join(dir, "agents")).map((entry) => join("agents", entry)).filter((entry) => entry !== join("agents", "gentle-ai-worker.md")), join("subagents", "review-risk.md"), "mcp.json"];
-	return { dir, names, originals: Object.fromEntries(names.map((name) => [name, readFileSync(join(dir, name), "utf8")])) };
-}
-
-test("S16: sessions that start at the same instant rewrite the same files without errors, leaving the right files and the original backups", async () => {
-	for (const sessions of [2, 4]) {
-		for (let round = 0; round < 3; round++) {
-			const { dir, names, originals } = manyAgentsDir();
-			const expectedDir = manyAgentsDir().dir;
-			applyCodegraphSubagents(expectedDir);
-			const startAt = Date.now() + 800;
-			const results = await Promise.all(Array.from({ length: sessions }, () => sessionApplying(dir, startAt)));
-			const label = `${sessions} sessions, round ${round}`;
-			assert.deepEqual(results.flatMap((result) => result.errors), [], label);
-			for (const name of names) {
-				assert.equal(readFileSync(join(dir, name), "utf8"), readFileSync(join(expectedDir, name.replace("gentle-ai-verify", "gentle-ai-verify")), "utf8"), `${label}: ${name}`);
-				assert.equal(readFileSync(join(dir, name) + ".pre-codegraph-subagents.bak", "utf8"), originals[name], `${label}: backup of ${name}`);
-			}
-			assert.deepEqual(readdirSync(join(dir, "agents")).filter((entry) => entry.endsWith(".tmp")), [], `${label}: no temp files left`);
-		}
-	}
 });
