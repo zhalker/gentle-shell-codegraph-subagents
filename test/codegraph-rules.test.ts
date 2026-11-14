@@ -72,6 +72,21 @@ test("S2: a primary session gets the orchestrator text; a child gets the generic
 	assert.equal(codegraphSection({ tools: [MCP], child: true }), fileText("generic"), "a child whose agent name could not be read");
 });
 
+test("S2: a text for a role that holds only the MCP tool never offers a native `codegraph` operation", () => {
+	// gentle-shell's own allowlist gives the native `codegraph` tool to the orchestrator and the explorer only;
+	// the worker, the fix agent, the verifier and the judges hold `mcp__codegraph__codegraph_explore` alone, so
+	// `init`, `query` and `explore` are no operation of theirs and their approved text names none of them.
+	const MCP_ONLY: readonly RuleVariant[] = ["worker", "fix", "verify", "judge"];
+	for (const variant of MCP_ONLY) {
+		assert.doesNotMatch(fileText(variant), /operation: "init"/, `${variant}.md names no native operation`);
+		assert.doesNotMatch(fileText(variant), /`query`|`explore`/, `${variant}.md names no native operation`);
+	}
+	// The two roles that do hold the native tool name it, so the check above is not vacuous.
+	for (const variant of ["orchestrator", "explore"] as const) {
+		assert.match(fileText(variant), /operation: "init"/, `${variant}.md names the native operation it holds`);
+	}
+});
+
 test("S2: a missing, unreadable or heading-less file falls back to the generic text; a missing generic text is no section", () => {
 	const onlyGeneric = createRuleTexts((file) => {
 		if (file.endsWith("generic.md")) return `${SECTION_MARKER}\n\nGeneric text.`;
