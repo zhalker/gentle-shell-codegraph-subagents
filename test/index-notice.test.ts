@@ -1,25 +1,19 @@
-// The index notice: on the first prompt of a session that has an index and a CodeGraph tool, the extension
-// states that the index exists, because a model that checks with find or grep sees nothing (.codegraph/ is
-// git-ignored) and then never calls CodeGraph. The same module writes the prefetch log.
+// The index lifecycle: where the index is, what preparing it is doing, and what an observed native
+// `codegraph init` gets appended. The first-prompt notice is gone: the fact that an index exists rides the
+// CodeGraph rule (`src/codegraph-rules.ts`), inside the section the model already receives.
 import { test, type TestContext } from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { codegraphTools } from "../src/agents.ts";
 import {
-	chooseIndexNotice,
-	codegraphTools,
 	findIndexRoot,
-	firstPromptMessage,
-	INDEX_NOTICE_MARKER,
-	INDEX_NOTICE_TYPE,
-	indexNotice,
 	noticeTools,
 	indexOutcomeNotice,
 	indexStartNotice,
 	warmOutcomeNotice,
 } from "../src/index-notice.ts";
-import { SKILL_REMINDER_TYPE } from "../src/skill-reminder.ts";
 import { adminShareOf } from "./helpers.ts";
 
 const MCP = "mcp__codegraph__codegraph_explore";
@@ -76,61 +70,8 @@ test("S1: the main session ignores the child env, and an empty or missing one ad
 	assert.deepEqual(noticeTools([], undefined, true), []);
 });
 
-test("S1: no notice on a non-user prompt, once sent, without a CodeGraph tool or without an index", (t) => {
+test("S4: a cwd spelled as the administrative share finds the index of the same project", (t) => {
 	const root = indexedDir(t);
-	const plain = scratchDir(t);
-	const base = { cwd: root, child: true, selectedTools: ["read", MCP], isUserPrompt: true, alreadySent: false };
-	assert.ok(chooseIndexNotice(base));
-	assert.equal(chooseIndexNotice({ ...base, isUserPrompt: false }), undefined);
-	assert.equal(chooseIndexNotice({ ...base, alreadySent: true }), undefined);
-	assert.equal(chooseIndexNotice({ ...base, selectedTools: ["read", "grep", "find"] }), undefined);
-	assert.equal(chooseIndexNotice({ ...base, cwd: plain }), undefined);
-});
-
-test("S1: an explorer child gets a notice that names its MCP tool and says no check is needed", (t) => {
-	const root = indexedDir(t);
-	const notice = chooseIndexNotice({ cwd: join(root, "src"), child: true, selectedTools: ["read", "grep", "find", "mcp__codegraph__*", MCP], isUserPrompt: true, alreadySent: false });
-	assert.ok(notice);
-	assert.ok(notice.startsWith(INDEX_NOTICE_MARKER), "the marker is where the extension looks for it");
-	assert.ok(notice.includes(root), "the model gets the real directory");
-	assert.match(notice, /HAS a CodeGraph index/);
-	assert.match(notice, /`mcp__codegraph__codegraph_explore`/);
-	assert.match(notice, /do not check whether the index exists: the extension already verified it/i);
-	assert.match(notice, /Pi's find and grep tools, fd and rg respect \.gitignore, so they never show \.codegraph\//);
-	assert.doesNotMatch(notice, /\bls\b/, "ls does show .codegraph/, so the notice must not claim otherwise");
-	assert.doesNotMatch(notice, /`codegraph` tool/, "the explorer does not hold the extension tool");
-});
-
-test("S1: the main session gets a notice naming both CodeGraph tools it holds", (t) => {
-	const root = indexedDir(t);
-	const notice = chooseIndexNotice({ cwd: root, child: false, selectedTools: ["bash", "codegraph", MCP], isUserPrompt: true, alreadySent: false });
-	assert.ok(notice);
-	assert.match(notice, /`codegraph` tool/);
-	assert.match(notice, /`mcp__codegraph__codegraph_explore`/);
-	assert.match(notice, /changed on disk after the last index sync/);
-});
-
-test("S1: the notice asks for the tools first and says how to search when CodeGraph is not enough", () => {
-	const notice = indexNotice("C:\\project", ["codegraph"]);
-	assert.match(notice, /call the `codegraph` tool .* FIRST, before grep, find or broad reads/);
-	assert.match(notice, /do not check whether the index exists/i);
-	assert.match(notice, /grep for string literals/);
-});
-
-test("S1: the first prompt carries the notice and the skill reminder as one message", () => {
-	const notice = `${INDEX_NOTICE_MARKER} this workspace has an index`;
-	const reminder = "For applicable code tasks, read and follow the codegraph-workflow skill.";
-
-	assert.equal(firstPromptMessage({ child: false }), undefined, "nothing to say");
-	assert.equal(firstPromptMessage({ child: false, notice: "", reminder: "" }), undefined, "empty parts say nothing");
-	assert.deepEqual(firstPromptMessage({ child: false, notice }), { customType: INDEX_NOTICE_TYPE, content: notice, display: true });
-	assert.deepEqual(firstPromptMessage({ child: true, notice }), { customType: INDEX_NOTICE_TYPE, content: notice, display: false }, "children keep it hidden");
-	assert.deepEqual(firstPromptMessage({ child: false, reminder }), { customType: SKILL_REMINDER_TYPE, content: reminder, display: false });
-	assert.deepEqual(firstPromptMessage({ child: true, notice, reminder }), { customType: SKILL_REMINDER_TYPE, content: `${notice}\n\n${reminder}`, display: false });
-	assert.deepEqual(firstPromptMessage({ child: false, notice, reminder }), { customType: SKILL_REMINDER_TYPE, content: `${notice}\n\n${reminder}`, display: true });
-});
-
-test("S4: a cwd spelled as the administrative share finds the index of the same project", (t) => {	const root = indexedDir(t);
 	mkdirSync(join(root, "src"), { recursive: true });
 	const cwd = adminShareOf(join(root, "src"));
 	const expected = adminShareOf(root);
@@ -139,7 +80,13 @@ test("S4: a cwd spelled as the administrative share finds the index of the same 
 		return;
 	}
 	assert.equal(findIndexRoot(cwd), expected);
-	assert.ok(chooseIndexNotice({ cwd, child: false, selectedTools: ["codegraph"], isUserPrompt: true, alreadySent: false }));
+});
+
+test("S5: the index fact is no longer a separate first-prompt notice", async () => {
+	const module = await import("../src/index-notice.ts");
+	for (const gone of ["INDEX_NOTICE_MARKER", "INDEX_NOTICE_TYPE", "chooseIndexNotice", "indexNotice", "firstPromptMessage"]) {
+		assert.equal(gone in module, false, `${gone} must not survive: the section carries the fact now`);
+	}
 });
 
 // --- S2/S6: the notices name the action really taken, and never present a pending or failed write as synced ---

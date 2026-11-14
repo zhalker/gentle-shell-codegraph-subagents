@@ -1,19 +1,15 @@
 import { copyFileSync, existsSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
 import { getAgentDir, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { Text } from "@earendil-works/pi-tui";
 import { readExposureWarning, readMissingServerWarning } from "../src/apply.ts";
 import { sessionIndexRole } from "../src/agents.ts";
 import { linkedWorktrees, prepareProject, runCodegraph, seedLinkedWorktrees, syncAfterNativeInit, type SessionStartReason } from "../src/autoindex.ts";
 import { compactionSync, realSyncLock } from "../src/compaction-sync.ts";
 import { appendCodegraphSection, codegraphSection } from "../src/codegraph-rules.ts";
 import { codegraphWritingIndex, isInitLocked, realInitLock } from "../src/initlock.ts";
-import { chooseIndexNotice, codegraphTools, firstPromptMessage, INDEX_NOTICE_TYPE, indexOutcomeNotice, indexStartNotice, initHookDecision, logSync, noticeTools, postInitSyncNotice, warmOutcomeNotice} from "../src/index-notice.ts";
-import { messageText, promptContext, promptMessageLine } from "../src/prompt-context.ts";
+import { codegraphTools, findIndexRoot, indexOutcomeNotice, indexStartNotice, initHookDecision, logSync, noticeTools, postInitSyncNotice, warmOutcomeNotice} from "../src/index-notice.ts";
 import { warmUpDaemon } from "../src/warmup.ts";
 import { repairFrozenAgentFiles, repairNotices, settleAgentFileRepairs, type RepairOutcome } from "../src/repair.ts";
-import { chooseSkillReminder, SKILL_REMINDER_TYPE } from "../src/skill-reminder.ts";
 
 // The repair never throws into extension loading or into a prompt: a failed repair is simply no repair.
 function safeRepair(run: () => RepairOutcome): RepairOutcome | undefined {
@@ -84,7 +80,6 @@ function seedSessionWorktrees(ctx: ExtensionContext): void {
 }
 
 export default function (pi: ExtensionAPI) {
-	let firstPromptSeen = false;
 	// Whether this session's tools include CodeGraph, read once per run from the same list the rule is gated on.
 	let codegraphAvailable = false;
 	// Runs at load, before gentle-pi's own startup install: a frozen agent file is moved aside here, so that
@@ -96,9 +91,7 @@ export default function (pi: ExtensionAPI) {
 	};
 	// The swap is settled once, on the first prompt of the parent session: gentle-pi's install has run by then.
 	let swapSettled = false;
-	// The summary of a compaction drops the first-prompt message; the next user prompt may send it again.
 	pi.on("session_compact", (_event, ctx) => {
-		firstPromptSeen = false;
 		// A long session's index is only as fresh as its last sync, so a compaction asks for one in the
 		// background: never an init, never a notification, and its result goes to sync.log.
 		void compactionSync({
@@ -139,15 +132,6 @@ export default function (pi: ExtensionAPI) {
 		}
 	});
 
-	// The first-prompt message as one short line that expands to the full text; what the model gets is unchanged.
-	// Only displayed messages are drawn, so a message sent again after a compaction never shows.
-	for (const customType of [SKILL_REMINDER_TYPE, INDEX_NOTICE_TYPE]) {
-		pi.registerMessageRenderer?.(customType, (message, options, theme) => {
-			const line = promptMessageLine(messageText(message.content), options.expanded, options.keyHint("app.tools.expand", options.expanded ? "to collapse" : "to expand"));
-			return new Text(theme.fg("customMessageText", line), options.outputPad, 0);
-		});
-	}
-
 	pi.on("session_start", async (event, ctx) => {
 		startAutoIndex(event.reason, ctx);
 		// Seed the session repo's unindexed worktrees in the background, so the index exists before the first
@@ -186,47 +170,21 @@ export default function (pi: ExtensionAPI) {
 		}
 	});
 
-	// First prompt of a session: the skill reminder and, when there is an index, the notice that says so.
-	// Only the explorer child: hand it the CodeGraph answer for its task before its first model call.
-	// With no index, no daemon or too slow a daemon, nothing is added and the daemon warm-up starts on its own.
-	pi.on("before_agent_start", async (event, ctx) => {
+	// Every run of a session that can call CodeGraph gets the rule, appended to the prompt options and never
+	// returned as a replacement prompt. A session without a CodeGraph tool (a reviewer, for example) gets
+	// nothing. When the checkout has an index, the section itself says so; there is no separate notice message.
+	pi.on("before_agent_start", (event, ctx) => {
 		try {
-			const isUserPrompt = event.messageType === "user";
 			const child = process.env.GENTLE_PI_AGENTS_CHILD === "1";
 			if (!swapSettled) {
 				swapSettled = true;
 				if (!child) notifyRepair(ctx, safeRepair(() => settleAgentFileRepairs({ agentDir: getAgentDir(), env: process.env })));
 			}
-			// The rule rides the prompt options, ahead of any message: a session without a CodeGraph tool
-			// (a reviewer, for example) gets no section at all.
 			const tools = noticeTools(event.systemPromptOptions?.selectedTools ?? [], process.env.GENTLE_PI_AGENTS_REQUESTED_TOOLS, child);
 			codegraphAvailable = codegraphTools(tools).length > 0;
-			appendCodegraphSection(event, codegraphSection({ tools }));
-			// Already sent means still in what the model sees: after a compaction both come back once.
-			const state = promptContext(ctx.sessionManager.getBranch());
-			const alreadySent = firstPromptSeen || state.reminderInContext;
-			const reminder = chooseSkillReminder({
-				expectedPath: join(import.meta.dirname, "..", "skills", "codegraph-workflow", "SKILL.md"),
-				skills: event.systemPromptOptions?.skills ?? [],
-				child,
-				systemPrompt: event.systemPrompt,
-				// A worker child is recognised by where gentle-pi put its body, not by a marker in its file.
-				argv: process.argv,
-				alreadySent,
-				isUserPrompt,
-			});
-			const notice = chooseIndexNotice({
-				cwd: ctx.cwd,
-				selectedTools: noticeTools(event.systemPromptOptions?.selectedTools ?? [], process.env.GENTLE_PI_AGENTS_REQUESTED_TOOLS, child),
-				isUserPrompt,
-				alreadySent: state.noticeInContext,
-			});
-			// The loaded context files are not inspected: a conflicting rule is neither detected nor reported.
-			if (isUserPrompt) firstPromptSeen = true;
-			const message = firstPromptMessage({ notice, reminder, child, afterCompaction: state.afterCompaction });
-			return message === undefined ? undefined : { message };
+			appendCodegraphSection(event, codegraphSection({ tools, root: codegraphAvailable ? findIndexRoot(ctx.cwd) : undefined }));
 		} catch {
-			return undefined;
+			// The loaded context files are not inspected: a conflicting rule is neither detected nor reported.
 		}
 	});
 }

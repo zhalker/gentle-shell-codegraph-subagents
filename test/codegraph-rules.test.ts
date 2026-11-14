@@ -1,6 +1,7 @@
-// S2/S3/S4: the CodeGraph rule is one system-prompt section, appended in place to the prompt options and never
-// returned as a replacement prompt. It reaches only a session whose tools include the native `codegraph` tool or
-// the MCP explore tool.
+// S2/S3/S4/S5: the CodeGraph rule is one system-prompt section, appended in place to the prompt options and
+// never returned as a replacement prompt. It reaches only a session whose tools include the native `codegraph`
+// tool or the MCP explore tool, and a checkout with an index says so inside the section instead of a separate
+// notice.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { appendCodegraphSection, codegraphSection, RULE_BULLETS, SECTION_MARKER } from "../src/codegraph-rules.ts";
@@ -29,6 +30,16 @@ test("S4: a session holding the native tool or the MCP tool gets the section; a 
 	assert.equal(codegraphSection({ tools: ["read", "grep", "find", "bash", "edit"] }), undefined, "a reviewer holds neither tool");
 	assert.equal(codegraphSection({ tools: [] }), undefined);
 	assert.equal(codegraphSection({ tools: ["mcp__other__tool"] }), undefined);
+});
+
+test("S5: an indexed checkout says so in one line inside the section, not in a separate message", () => {
+	const root = "C:\\project";
+	const indexed = codegraphSection({ tools: [MCP], root });
+	assert.equal(indexed, `${SECTION}\n- This workspace HAS a CodeGraph index at C:\\project; the extension verified that \`.codegraph/codegraph.db\` exists.`);
+	const plain = codegraphSection({ tools: [MCP] });
+	assert.ok(plain);
+	assert.doesNotMatch(plain, /HAS a CodeGraph index/);
+	assert.equal(codegraphSection({ tools: [MCP], root: "" }), SECTION, "an empty root is not an index");
 });
 
 test("S3: the section is appended after the existing prompt text and never added twice", () => {
