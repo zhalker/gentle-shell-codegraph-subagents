@@ -2,13 +2,13 @@ import { copyFileSync, existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { getAgentDir, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { readExposureWarning, readMissingServerWarning } from "../src/apply.ts";
-import { sessionIndexRole } from "../src/agents.ts";
+import { codegraphTools, sessionIndexRole } from "../src/agents.ts";
 import { linkedWorktrees, prepareProject, runCodegraph, seedLinkedWorktrees, syncAfterNativeInit, type SessionStartReason } from "../src/autoindex.ts";
 import { compactionSync, realSyncLock } from "../src/compaction-sync.ts";
 import { appendCodegraphSection, codegraphSection } from "../src/codegraph-rules.ts";
 import { createExplorationBudget, EXPLORATION_REMINDER_TYPE, observeToolCall, reminderAudience, resetExplorationBudget } from "../src/exploration-reminder.ts";
 import { codegraphWritingIndex, isInitLocked, realInitLock } from "../src/initlock.ts";
-import { codegraphTools, findIndexRoot, indexOutcomeNotice, indexStartNotice, initHookDecision, logSync, noticeTools, postInitSyncNotice, warmOutcomeNotice} from "../src/index-notice.ts";
+import { findIndexRoot, indexOutcomeNotice, indexStartNotice, initHookDecision, logSync, noticeTools, postInitSyncNotice, warmOutcomeNotice} from "../src/index-notice.ts";
 import { warmUpDaemon } from "../src/warmup.ts";
 import { repairFrozenAgentFiles, repairNotices, settleAgentFileRepairs, type RepairOutcome } from "../src/repair.ts";
 
