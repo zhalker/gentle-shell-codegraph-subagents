@@ -130,8 +130,13 @@ does not carry is kept as the directory spells it, so a `review-` child is still
 
 The texts follow gentle-shell's own allowlists: the native `codegraph` tool (which can `init`, `query` and `explore`)
 is granted to the orchestrator and the explorer, while the worker, the fix agent, the verifier and both judges hold
-`mcp__codegraph__codegraph_explore` alone. Their texts therefore name no native operation — the worker and the fix
-agent create an index with `codegraph init` through `bash`, and verify and the judges create none at all.
+`mcp__codegraph__codegraph_explore` alone, named in full wherever a text names it. No text tells an agent to create or
+refresh an index: that is the extension's job at session start, so a session without one is told to fall back to
+`read`, `grep` and `find`, and verify and the judges are told that the index they read is left alone.
+
+A text is the role's addition to its own agent file, not a replacement for it: the explorer's base file already states
+the gate, the fallback and the index rules, so `explore.md` carries only the delta over it. Only `generic.md` names
+both tool shapes, because it serves a child whose tools are not known.
 
 Each file is read at most once per variant, and a read never throws. A missing, unreadable or heading-less file falls
 back to `generic.md`, and when that cannot be read either the session gets no section rather than a broken prompt.
@@ -165,7 +170,8 @@ no-sync-after-failure rule, daemon resolution per checkout with and without MCP 
 through the native tool and through MCP, a worktree versus its parent checkout, the read-only role rule, the two
 read-only `mcp.json` warnings (missing server, unavailable exposure), the agent name read from a child's own argv and
 the six role mappings, the primary and generic cases, the exact text of every shipped file and its per-file read
-cache, the fact that a role holding only the MCP tool is offered no native operation, the generic fallback of a
+cache, the facts that no text offers an `init` operation and that the MCP tool is named in full, the role whose text
+is the delta over its agent file, the generic fallback of a
 missing or heading-less file, the tool and `review-` gates, append/idempotency and
 the index line, the absence of the exploration reminder, and the absence of a
 packaged skill. No test spawns a real `codegraph`, `git` or network call; runners are injected and scratch state

@@ -72,18 +72,33 @@ test("S2: a primary session gets the orchestrator text; a child gets the generic
 	assert.equal(codegraphSection({ tools: [MCP], child: true }), fileText("generic"), "a child whose agent name could not be read");
 });
 
-test("S2: a text for a role that holds only the MCP tool never offers a native `codegraph` operation", () => {
+test("S2: no role's text offers a native `init` operation, and the MCP tool is named in full", () => {
+	// The index is the extension's job at session start, so no text tells an agent to create or refresh one: a
+	// session without one is told to fall back to `read`, `grep` and `find`. `explore.md` mentions `init` and
+	// `sync` only to describe how the CLI takes the project path, which is not an instruction to run either.
+	for (const variant of RULE_VARIANTS) {
+		const text = fileText(variant);
+		assert.doesNotMatch(text, /operation: "init"/, `${variant}.md offers no native init operation`);
+		assert.doesNotMatch(text, /`codegraph init`|`codegraph sync`|create it with/, `${variant}.md tells no one to create an index`);
+		assert.doesNotMatch(text, /`codegraph_explore`/, `${variant}.md names the MCP tool in full`);
+	}
+	for (const variant of ["orchestrator", "generic", "worker", "fix"] as const) {
+		assert.match(fileText(variant), /fall back to `read`, `grep` and `find`/, `${variant}.md says what to do with no index`);
+	}
+	for (const variant of ["verify", "judge"] as const) {
+		assert.match(fileText(variant), /leaves it alone/, `${variant}.md leaves the index it reads alone`);
+	}
+	// The explorer's own agent file already states the gate, the fallback and the index rules, so its section is the
+	// delta over that file: what `query` and `explore` are for, the evidence rule, and the CLI path argument.
+	const explore = fileText("explore");
+	assert.match(explore, /`query` finds symbols; `explore` returns source plus call paths/);
+	assert.match(explore, /no copied, symlinked or substituted index/);
+	assert.doesNotMatch(explore, /fall back to `read`, `grep` and `find`/, "the base agent file already carries the fallback");
 	// gentle-shell's own allowlist gives the native `codegraph` tool to the orchestrator and the explorer only;
 	// the worker, the fix agent, the verifier and the judges hold `mcp__codegraph__codegraph_explore` alone, so
-	// `init`, `query` and `explore` are no operation of theirs and their approved text names none of them.
-	const MCP_ONLY: readonly RuleVariant[] = ["worker", "fix", "verify", "judge"];
-	for (const variant of MCP_ONLY) {
-		assert.doesNotMatch(fileText(variant), /operation: "init"/, `${variant}.md names no native operation`);
+	// `query` and `explore` are no operation of theirs.
+	for (const variant of ["worker", "fix", "verify", "judge"] as const) {
 		assert.doesNotMatch(fileText(variant), /`query`|`explore`/, `${variant}.md names no native operation`);
-	}
-	// The two roles that do hold the native tool name it, so the check above is not vacuous.
-	for (const variant of ["orchestrator", "explore"] as const) {
-		assert.match(fileText(variant), /operation: "init"/, `${variant}.md names the native operation it holds`);
 	}
 });
 

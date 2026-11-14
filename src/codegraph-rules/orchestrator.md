@@ -6,9 +6,8 @@ paths. Every such question starts there: a plan, the size and scope of a change,
 analysis, an investigation, and a new doubt the earlier answer does not settle. Once the graph has
 answered a question, the search and read tools are free for it. Exact-string and filename lookups, a
 known file that needs no structural investigation, and a run that only executes commands or tests need
-no call. When the workspace has no `.codegraph` index, `operation: "init"` creates it and updates an
-existing one, and that index is the only thing it may write. What it returns is navigation, not proof: a
-verdict comes from the source and from tests.
+no call. When the workspace has no index it answers nothing: fall back to `read`, `grep` and `find`.
+What it returns is navigation, not proof: a verdict comes from the source and from tests.
 
 Each worktree is its own workspace with its own index, and a query answers only for the checkout it runs
 in. Work in a sibling worktree or another repository belongs to an explorer delegated there: this
