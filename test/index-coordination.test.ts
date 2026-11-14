@@ -159,3 +159,20 @@ test("S2: the main checkout itself is never seeded from its own index", (t) => {
 	});
 	assert.deepEqual(result, { seeded: [], skipped: [] });
 });
+
+test("S2: without an explicit source check, the main index's own lock decides whether a worktree is seeded", (t) => {
+	const base = scratch(t);
+	const { worktree } = linkedWorktree(base);
+	let copied = false;
+	const result = seedLinkedWorktrees({
+		worktrees: [worktree],
+		lock: recordingLock([], true),
+		exists: existsSync,
+		// No sourceBusy: the fallback reads the main checkout's lock, so a writer there stops the copy.
+		sourceBusy: undefined as never,
+		copy: () => { copied = true; return true; },
+	});
+	assert.equal(copied, false);
+	assert.deepEqual(result.seeded, []);
+	assert.equal(existsSync(join(worktree, ".codegraph")), false);
+});

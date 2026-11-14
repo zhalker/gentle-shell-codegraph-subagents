@@ -1,8 +1,8 @@
 import { appendFileSync, existsSync, mkdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
-import { CODEGRAPH_MCP_TOOL } from "./agents.ts";
-import type { AutoIndexResult, IndexAction } from "./autoindex.ts";
+import { CODEGRAPH_MCP_TOOL, mayInitiateIndexWrite, NATIVE_CODEGRAPH_TOOL, type IndexRole } from "./agents.ts";
+import type { AutoIndexResult, IndexAction, PostInitSyncOutcome } from "./autoindex.ts";
 import type { PerCaseOutcome } from "./prefetch.ts";
 import { SKILL_REMINDER_TYPE } from "./skill-reminder.ts";
 
@@ -120,6 +120,50 @@ export function warmOutcomeNotice(outcome: "ok" | "failed", cwd: string): IndexN
 	return outcome === "ok"
 		? { text: "CodeGraph ready", level: "info" }
 		: { text: `CodeGraph warm-up failed in ${cwd}`, level: "warning" };
+}
+
+/** The parts of a finished Pi tool call this package reads. */
+export interface ToolResultSummary {
+	toolName: string;
+	isError: boolean;
+	input: Record<string, unknown>;
+}
+
+/** Whether this finished call was a successful native `codegraph init`: the one call the hook observes. */
+export function isNativeInitResult(event: ToolResultSummary): boolean {
+	return event.toolName === NATIVE_CODEGRAPH_TOOL && event.input?.operation === "init" && event.isError === false;
+}
+
+/**
+ * What the post-`init` hook does with one finished tool call. Only a successful native `codegraph init` is
+ * followed by the plugin's own coordinated sync; a failed init keeps its original error and triggers nothing.
+ */
+export type InitHookDecision = "sync" | "skip-not-a-native-init" | "skip-failed-init" | "skip-read-only";
+
+export function initHookDecision(event: ToolResultSummary, role: IndexRole | undefined): InitHookDecision {
+	if (event.toolName !== NATIVE_CODEGRAPH_TOOL || event.input?.operation !== "init") return "skip-not-a-native-init";
+	if (event.isError) return "skip-failed-init";
+	if (!mayInitiateIndexWrite(role)) return "skip-read-only";
+	return "sync";
+}
+
+/**
+ * The line the hook appends to the tool's own result. It never calls an unconfirmed index current: a pending or
+ * failed request says so, and a read-only role says that no sync was requested at all.
+ */
+export function postInitSyncNotice(outcome: PostInitSyncOutcome): string {
+	const lead = "gentle-shell-codegraph-subagents: after that `codegraph init`";
+	if (outcome === "completed") return `${lead}, one coordinated index sync completed.`;
+	if (outcome === "pending") {
+		return `${lead}, a coordinated index sync is pending: the request is recorded and runs when the index is free. This index is not confirmed current yet.`;
+	}
+	if (outcome === "unavailable") {
+		return `${lead}, no coordinated sync could be started (the coordination state was unusable); this index is not confirmed current.`;
+	}
+	if (outcome === "skipped-read-only") {
+		return `${lead}, no sync was requested: this session's role is read-only, and verify and the judges never start an index write.`;
+	}
+	return `${lead}, the coordinated index sync failed; this index may be behind.`;
 }
 
 /** Appends one line of diagnostics to `file`; control characters in the folder become "?" so a record cannot be forged. */

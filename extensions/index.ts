@@ -5,14 +5,14 @@ import { join } from "node:path";
 import { getAgentDir, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { applyCodegraphSubagents, readExposureWarning, readMissingServerWarning } from "../src/apply.ts";
-import { prepareProject, runCodegraph, seedLinkedWorktrees, type SessionStartReason } from "../src/autoindex.ts";
+import { sessionIndexRole } from "../src/agents.ts";
+import { prepareProject, runCodegraph, seedLinkedWorktrees, syncAfterNativeInit, type SessionStartReason } from "../src/autoindex.ts";
 import { compactionSync, realSyncLock } from "../src/compaction-sync.ts";
 import { exploreViaDaemon } from "../src/daemonclient.ts";
 import { codegraphWritingIndex, isInitLocked, isInitRunning, realInitLock } from "../src/initlock.ts";
-import { chooseIndexNotice, firstPromptMessage, INDEX_NOTICE_TYPE, indexOutcomeNotice, indexStartNotice, logPrefetch, logSync, noticeTools, warmOutcomeNotice, type PrefetchOutcome } from "../src/index-notice.ts";
+import { chooseIndexNotice, firstPromptMessage, INDEX_NOTICE_TYPE, indexOutcomeNotice, indexStartNotice, initHookDecision, logPrefetch, logSync, noticeTools, postInitSyncNotice, warmOutcomeNotice, type PrefetchOutcome } from "../src/index-notice.ts";
 import { explorePerCase, prefetchForExplorer } from "../src/prefetch.ts";
 import { messageText, promptContext, promptMessageLine } from "../src/prompt-context.ts";
-import { seedWorktreeIndex } from "../src/seed.ts";
 import { worktreeOf } from "../src/worktree.ts";
 import { warmUpDaemon } from "../src/warmup.ts";
 import { repairFrozenAgentFiles, repairNotices, settleAgentFileRepairs, type RepairOutcome } from "../src/repair.ts";
@@ -128,6 +128,32 @@ export default function (pi: ExtensionAPI) {
 			run: runCodegraph,
 			log: (entry) => logSync(entry),
 		});
+	});
+
+	// A native `codegraph init` is observed, never replaced: this package registers no tool, shadows nothing and
+	// depends on no load order. After a successful init it asks its own coordination for one sync and appends that
+	// outcome to the tool's own result. A failed init keeps its original error and triggers nothing, and the hook
+	// never makes the call fail: Pi catches a throwing handler (extensions.md, tool_result).
+	pi.on("tool_result", async (event, ctx) => {
+		try {
+			const decision = initHookDecision(event, sessionIndexRole(process.env));
+			if (decision === "skip-not-a-native-init" || decision === "skip-failed-init") return undefined;
+			const outcome = decision === "skip-read-only"
+				? "skipped-read-only" as const
+				: await syncAfterNativeInit({
+					cwd: ctx.cwd,
+					exists: existsSync,
+					lock: realInitLock,
+					sync: realSyncLock,
+					run: runCodegraph,
+					role: sessionIndexRole(process.env),
+					log: (entry) => logSync(entry),
+				});
+			return { content: [...event.content, { type: "text" as const, text: postInitSyncNotice(outcome) }] };
+		} catch {
+			// A hook that cannot work appends nothing: the tool result stays exactly as it came back.
+			return undefined;
+		}
 	});
 
 	// The first-prompt message as one short line that expands to the full text; what the model gets is unchanged.

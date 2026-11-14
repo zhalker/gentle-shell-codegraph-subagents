@@ -1,7 +1,8 @@
 import { spawn } from "node:child_process";
 import { copyFileSync } from "node:fs";
 import { join } from "node:path";
-import { codegraphWritingIndex, isInitLocked, type InitLock } from "./initlock.ts";
+import { mayInitiateIndexWrite, type IndexRole } from "./agents.ts";
+import { codegraphWritingIndex, type InitLock } from "./initlock.ts";
 import { killTree } from "./prefetch.ts";
 import { projectArgument } from "./daemonclient.ts";
 import { codegraphSpawn } from "./paths.ts";
@@ -119,7 +120,7 @@ export interface AutoIndexInput {
 }
 
 /** Subagent children of one parent share the parent's project: a /reload is not a new session. */
-function skipsSession(input: Pick<AutoIndexInput, "env" | "reason">): boolean {
+function skipsSession(input: Pick<AutoIndexInput, "cwd" | "env" | "reason" | "exists">): boolean {
 	return input.env[CHILD_ENV] === "1" && !childWorktreeNeedsIndex(input) || input.reason === "reload";
 }
 
@@ -168,7 +169,7 @@ export async function autoIndex(input: AutoIndexInput): Promise<AutoIndexResult>
 			try {
 				if (input.exists(join(input.cwd, ".codegraph"))) return { action, ok: true, joined: true };
 				const commonRoot = (worktreeAction as { action: "seed"; commonRoot: string }).commonRoot;
-				const busy = input.sourceBusy ?? ((root: string) => (typeof input.lock?.isInitLocked === "function" ? input.lock.isInitLocked(root) : false));
+				const busy = input.sourceBusy ?? ((root: string) => input.lock?.isHeld(root) ?? false);
 				if (busy(commonRoot)) return { action, ok: true, joined: true };
 				announce();
 				const seeded = seedWorktreeIndex({
@@ -282,6 +283,76 @@ export function seedLinkedWorktrees(input: LinkedWorktreeSeedInput): LinkedWorkt
 		}
 	}
 	return result;
+}
+
+/**
+ * How long the tool result of a native `codegraph init` waits for the sync the plugin requested before it reports
+ * it as pending. The request is not cancelled: it stays recorded in the coordination and runs when the index is
+ * free, so the 10 s only bounds how long the tool call waits for its answer.
+ */
+export const POST_INIT_SYNC_WAIT_MS = 10_000;
+
+/** What the post-`init` hook could report. Only `completed` means a sync really came back. */
+export type PostInitSyncOutcome = "completed" | "pending" | "failed" | "unavailable" | "skipped-read-only";
+
+export interface PostInitSyncInput {
+	/** The checkout the observed init ran in: its own index, never a parent checkout's. */
+	cwd: string;
+	exists(path: string): boolean;
+	/** The package's index lock: the sync holds it for its whole run. */
+	lock?: InitLock;
+	/** The per-project sync coordination shared with the other sessions of this user. */
+	sync: SyncCoordinator;
+	run(args: string[], cwd: string, timeoutMs: number, onSpawn?: (pid: number, options?: { proxy?: boolean }) => void): Promise<boolean>;
+	/** The role of this session, when it is a subagent child: a read-only role starts no index write. */
+	role?: IndexRole;
+	/** Overrides {@link POST_INIT_SYNC_WAIT_MS}. */
+	waitMs?: number;
+	/** Where the final outcome goes: the request may finish after the tool result was already returned. */
+	log?(entry: { cwd: string; outcome: string; ms: number }): void;
+}
+
+/**
+ * After a native `codegraph init` came back successfully, requests exactly one coordinated sync of that checkout
+ * through the package's own coordination, never a second uncoordinated `init` or `sync`. It returns `completed`
+ * only for a run that really came back, `pending` for a request that is still recorded on disk, and `failed` or
+ * `unavailable` otherwise; the final outcome is logged even when the bounded wait already returned `pending`.
+ * Never throws.
+ */
+export async function syncAfterNativeInit(input: PostInitSyncInput): Promise<PostInitSyncOutcome> {
+	const started = Date.now();
+	try {
+		if (!mayInitiateIndexWrite(input.role)) return "skipped-read-only";
+		if (!input.exists(join(input.cwd, ".codegraph"))) {
+			// A successful init that left no index gives nothing to sync, and syncing a missing index would fail.
+			input.log?.({ cwd: input.cwd, outcome: "init-sync-failed", ms: Date.now() - started });
+			return "failed";
+		}
+		const request = requestCoordinatedSync({ project: input.cwd, sync: input.sync, lock: input.lock, run: input.run });
+		// The request keeps going after the wait below; its real outcome is what gets logged, once.
+		const settled = request.then(
+			(value) => {
+				input.log?.({ cwd: input.cwd, outcome: `init-sync-${value}`, ms: Date.now() - started });
+				return value;
+			},
+			() => {
+				input.log?.({ cwd: input.cwd, outcome: "init-sync-failed", ms: Date.now() - started });
+				return "failed" as const;
+			},
+		);
+		const waitMs = Math.max(1, input.waitMs ?? POST_INIT_SYNC_WAIT_MS);
+		const raced = await Promise.race([
+			settled,
+			new Promise<undefined>((resolve) => { setTimeout(() => resolve(undefined), waitMs); }),
+		]);
+		if (raced === undefined) return "pending";
+		if (raced === "synced" || raced === "coalesced") return "completed";
+		if (raced === "pending") return "pending";
+		if (raced === "unavailable") return "unavailable";
+		return "failed";
+	} catch {
+		return "failed";
+	}
 }
 
 /** The seed copy for real runs: a plain file copy of the db, staged by {@link seedWorktreeIndex}. */
