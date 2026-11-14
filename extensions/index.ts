@@ -6,6 +6,7 @@ import { sessionIndexRole } from "../src/agents.ts";
 import { linkedWorktrees, prepareProject, runCodegraph, seedLinkedWorktrees, syncAfterNativeInit, type SessionStartReason } from "../src/autoindex.ts";
 import { compactionSync, realSyncLock } from "../src/compaction-sync.ts";
 import { appendCodegraphSection, codegraphSection } from "../src/codegraph-rules.ts";
+import { createExplorationBudget, EXPLORATION_REMINDER_TYPE, observeToolCall, reminderAudience, resetExplorationBudget } from "../src/exploration-reminder.ts";
 import { codegraphWritingIndex, isInitLocked, realInitLock } from "../src/initlock.ts";
 import { codegraphTools, findIndexRoot, indexOutcomeNotice, indexStartNotice, initHookDecision, logSync, noticeTools, postInitSyncNotice, warmOutcomeNotice} from "../src/index-notice.ts";
 import { warmUpDaemon } from "../src/warmup.ts";
@@ -82,6 +83,9 @@ function seedSessionWorktrees(ctx: ExtensionContext): void {
 export default function (pi: ExtensionAPI) {
 	// Whether this session's tools include CodeGraph, read once per run from the same list the rule is gated on.
 	let codegraphAvailable = false;
+	// One reminder per session, on the first search-shaped call made before any CodeGraph call; a compaction
+	// starts the budget over.
+	const exploration = createExplorationBudget();
 	// Runs at load, before gentle-pi's own startup install: a frozen agent file is moved aside here, so that
 	// install recreates it from its assets and manages it again. A subagent child repairs nothing.
 	const loadRepair = process.env.GENTLE_PI_AGENTS_CHILD === "1" ? undefined : safeRepair(() => repairFrozenAgentFiles({ agentDir: getAgentDir(), home: homedir(), env: process.env }));
@@ -92,6 +96,7 @@ export default function (pi: ExtensionAPI) {
 	// The swap is settled once, on the first prompt of the parent session: gentle-pi's install has run by then.
 	let swapSettled = false;
 	pi.on("session_compact", (_event, ctx) => {
+		resetExplorationBudget(exploration);
 		// A long session's index is only as fresh as its last sync, so a compaction asks for one in the
 		// background: never an init, never a notification, and its result goes to sync.log.
 		void compactionSync({
@@ -168,6 +173,22 @@ export default function (pi: ExtensionAPI) {
 		} catch {
 			// Never block a session over this.
 		}
+	});
+
+	// One advisory message, never a veto: the first search-shaped call of a session that can call CodeGraph and
+	// has not called it yet is reminded once. Only the primary session and a read-only explorer-style child are
+	// reminded; a child that writes files is not. The call always goes through, and nothing here can throw.
+	pi.on("tool_call", (event) => {
+		try {
+			if (!codegraphAvailable || !reminderAudience(process.env)) return undefined;
+			const reminder = observeToolCall(exploration, event);
+			if (reminder !== undefined) {
+				pi.sendMessage({ customType: EXPLORATION_REMINDER_TYPE, content: reminder, display: true }, { deliverAs: "steer" });
+			}
+		} catch {
+			// The reminder is advisory and must never block or fail the call.
+		}
+		return undefined;
 	});
 
 	// Every run of a session that can call CodeGraph gets the rule, appended to the prompt options and never
