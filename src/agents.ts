@@ -3,6 +3,9 @@ export const CODEGRAPH_MCP_TOOL = "mcp__codegraph__codegraph_explore";
 /** The native CodeGraph extension tool: the one that can `init`, `query` and `explore` itself. */
 export const NATIVE_CODEGRAPH_TOOL = "codegraph";
 
+/** The marker an older version of this package appended to a worker agent body; the repair recognises it. */
+export const WORKER_MARKER = "<!-- codegraph-workflow:worker -->";
+
 /** gentle-pi marks a subagent child with this variable and puts the tool list it requested in the other one. */
 export const CHILD_ENV = "GENTLE_PI_AGENTS_CHILD";
 export const REQUESTED_TOOLS_ENV = "GENTLE_PI_AGENTS_REQUESTED_TOOLS";

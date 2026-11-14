@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { existsSync, linkSync, mkdirSync, readFileSync, readdirSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { isAbsolute, join, resolve } from "node:path";
 import { normalizeAgentV010, normalizeAgentV020ToV060 } from "./legacy-agents.ts";
-import { WORKER_MARKER } from "./skill-reminder.ts";
+import { WORKER_MARKER } from "./agents.ts";
 
 /**
  * Where a repaired file waits for gentle-pi to recreate it: a swap, never a delete (S11). Not `.md`, so

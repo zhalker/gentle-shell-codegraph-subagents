@@ -25,16 +25,12 @@
   "files": [
     "extensions",
     "src",
-    "skills",
     "README.md",
     "LICENSE"
   ],
   "pi": {
     "extensions": [
       "./extensions/index.ts"
-    ],
-    "skills": [
-      "./skills"
     ]
   },
   "scripts": {
