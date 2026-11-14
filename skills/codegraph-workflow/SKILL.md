@@ -22,6 +22,10 @@ this skill is available.
   for ongoing initialization, indexing, or synchronization where possible;
   do not start another operation while one is running. If you cannot tell
   whether it is safe, explain the uncertainty instead of assuming it is.
+- Read-only roles (verify and the judges) never start `init` or `sync`.
+  When a sync is requested, a successful native `codegraph init` is
+  followed by one coordinated sync whose outcome the extension appends to
+  that tool result; treat `pending` or `failed` there as "not current".
 - Treat CodeGraph results as navigation hints, not authoritative source.
   Confirm relevant behavior and findings against the source files.
 
