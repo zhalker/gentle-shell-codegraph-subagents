@@ -5,7 +5,7 @@ import { spawnSync } from "node:child_process";
 import { existsSync, mkdtempSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { DAEMON_HELLO_TIMEOUT_MS, exploreViaDaemon } from "../src/daemonclient.ts";
+import { DAEMON_HELLO_TIMEOUT_MS, daemonStatus, exploreViaDaemon, liveDaemon, registeredRoot } from "../src/daemonclient.ts";
 import { explorePerCase, prefetchForExplorer } from "../src/prefetch.ts";
 import { warmUpDaemon } from "../src/warmup.ts";
 import { daemonPids, hasCodegraph, indexedProject, stopDaemon } from "./helpers.ts";
@@ -376,5 +376,62 @@ test("S15 real: no daemon: the prefetch adds nothing at once and its background 
 		assert.match(String(text), /warmFn1/, "the next prefetch must find the daemon warm");
 	} finally {
 		stopDaemon(dir);
+	}
+});
+
+// --- S4: the daemon of one checkout, resolved from that checkout only, never from MCP configuration ---
+
+test("S4: a checkout's live registered daemon is reported with its socket, and its status is live", async () => {
+	const daemon = await fakeDaemon({});
+	try {
+		const registryDir = registry([{ root: ROOT, socketPath: daemon.path, startedAt: 7 }]);
+		assert.deepEqual(liveDaemon(ROOT, registryDir), { root: ROOT, socketPath: daemon.path, pid: process.pid });
+		assert.equal(daemonStatus(ROOT, registryDir), "live");
+	} finally {
+		daemon.close();
+	}
+});
+
+test("S4: a record whose daemon is gone is dead, an empty registry is none, and neither is a live daemon", async () => {
+	const dead = pipePath();
+	assert.equal(daemonStatus(ROOT, registry([{ root: ROOT, socketPath: dead }])), "dead");
+	assert.equal(daemonStatus(ROOT, registry([])), "none");
+	assert.equal(daemonStatus(ROOT, join(tmpdir(), "pcs-no-registry-here")), "none");
+	assert.equal(liveDaemon(ROOT, registry([{ root: ROOT, socketPath: dead }])), undefined);
+});
+
+test("S4: a worktree is its own checkout: its parent's daemon is never its own", async (t) => {
+	const parent = realpathSync(mkdtempSync(join(tmpdir(), "pcs-parent-")));
+	const child = realpathSync(mkdtempSync(join(tmpdir(), "pcs-child-")));
+	const daemon = await fakeDaemon({});
+	try {
+		const registryDir = registry([{ root: parent, socketPath: daemon.path }]);
+		assert.equal(daemonStatus(child, registryDir), "none");
+		assert.equal(liveDaemon(child, registryDir), undefined);
+		assert.equal(registeredRoot(child, registryDir), undefined, "the parent's spelling is never handed to a child");
+		assert.deepEqual(await exploreViaDaemon(child, "q", 2_000, { registryDir }), { status: "unavailable" });
+	} finally {
+		daemon.close();
+		t.after?.(() => undefined);
+	}
+});
+
+test("S4: an MCP server entry is not evidence of a reachable daemon", (t) => {
+	// A checkout whose MCP configuration names the CodeGraph server, and whose daemon registry says nothing.
+	const checkout = realpathSync(mkdtempSync(join(tmpdir(), "pcs-mcp-")));
+	writeFileSync(join(checkout, "mcp.json"), JSON.stringify({ mcpServers: { codegraph: { command: "codegraph", args: ["serve", "--mcp"] } } }));
+	assert.equal(daemonStatus(checkout, registry([])), "none");
+	assert.equal(liveDaemon(checkout, registry([])), undefined);
+	t.after(() => undefined);
+});
+
+test("S4: a live daemon needs no MCP entry to be resolved and used", async () => {
+	const daemon = await fakeDaemon({});
+	try {
+		const registryDir = registry([{ root: ROOT, socketPath: daemon.path }]);
+		assert.equal(daemonStatus(ROOT, registryDir), "live");
+		assert.deepEqual(await exploreViaDaemon(ROOT, "q", 5_000, { registryDir }), { status: "ok", text: "FAKE EXPLORE OUTPUT" });
+	} finally {
+		daemon.close();
 	}
 });

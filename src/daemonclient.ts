@@ -41,6 +41,16 @@ interface RegisteredDaemon {
 	pid?: number;
 }
 
+/** A daemon record of one checkout that is really there: its process runs and its socket is still present. */
+export interface LiveDaemon {
+	root: string;
+	socketPath: string;
+	pid?: number;
+}
+
+/** Whether one checkout has a live daemon, only dead records, or no record at all. */
+export type DaemonStatus = "live" | "dead" | "none";
+
 /** Whether a process with this pid exists; signal 0 only checks. EPERM means it exists under another user. */
 function processAlive(pid: number): boolean {
 	try { process.kill(pid, 0); return true; } catch (error) { return (error as NodeJS.ErrnoException).code === "EPERM"; }
@@ -91,16 +101,36 @@ function socketsFor(root: string, registryDir: string): string[] {
 }
 
 /**
+ * The newest registered daemon of exactly `root` whose process runs and whose socket is still there. A worktree
+ * or child checkout is its own root: nothing registered for another checkout is ever returned here. This reads
+ * the registry only — it never starts, connects to or stops anything, and it is not affected by MCP server
+ * configuration, which says nothing about whether a daemon is reachable.
+ */
+export function liveDaemon(root: string, registryDir: string = DEFAULT_REGISTRY()): LiveDaemon | undefined {
+	const alive = daemonsFor(root, registryDir).find((entry) => entry.pid !== undefined && processAlive(entry.pid) && socketPresent(entry.socketPath));
+	return alive === undefined ? undefined : { root: alive.root, socketPath: alive.socketPath, ...(alive.pid === undefined ? {} : { pid: alive.pid }) };
+}
+
+/**
+ * What the daemon state of this checkout is: a live one, only records whose daemon is gone, or none. The answer
+ * comes from the registry of this root alone, never from an MCP server entry: a configured MCP server does not
+ * mean a daemon is reachable, and a reachable daemon needs no MCP entry to be used.
+ */
+export function daemonStatus(root: string, registryDir: string = DEFAULT_REGISTRY()): DaemonStatus {
+	const daemons = daemonsFor(root, registryDir);
+	if (daemons.length === 0) return "none";
+	return liveDaemon(root, registryDir) === undefined ? "dead" : "live";
+}
+
+/**
  * How the newest daemon of this project spells its root, or undefined when none is registered. Passing that
  * spelling to codegraph keeps it on the same daemon: CodeGraph keys daemons by the path it was given, and
  * W:\project next to w:\project already runs two daemons for one project on this machine.
  */
 export function registeredRoot(root: string, registryDir: string = DEFAULT_REGISTRY()): string | undefined {
-	const daemons = daemonsFor(root, registryDir);
 	// Dead records stay in the registry (CodeGraph owns those files), but they never win: a record is alive only
 	// while its process runs and its socket is still there, so a reused pid cannot make a stale spelling win.
-	const alive = daemons.find((entry) => entry.pid !== undefined && processAlive(entry.pid) && socketPresent(entry.socketPath));
-	return (alive ?? daemons[0])?.root;
+	return (liveDaemon(root, registryDir) ?? daemonsFor(root, registryDir)[0])?.root;
 }
 
 /** The path to hand to the codegraph CLI for this project: the registered spelling when there is one. */

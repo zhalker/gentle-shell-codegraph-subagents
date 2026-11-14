@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
 import { pathToFileURL } from "node:url";
 import { tmpdir } from "node:os";
-import { NO_PROJECT_TEXT, projectArgument } from "./daemonclient.ts";
+import { daemonStatus, exploreViaDaemon, NO_PROJECT_TEXT, projectArgument, type DaemonExploreResult, type DaemonStatus } from "./daemonclient.ts";
 import { serveCommand } from "./paths.ts";
 
 /** A cold daemon on a network share can need over a minute for its first read. */
@@ -25,6 +25,15 @@ export interface ExploreOnceOptions {
 	 * holds the process until it has a result.
 	 */
 	background?: boolean;
+}
+
+export interface WarmOptions extends ExploreOnceOptions {
+	/** Where daemons register themselves; defaults to `~/.codegraph/daemons`. */
+	registryDir?: string;
+	/** Whether this checkout has a live daemon; defaults to {@link daemonStatus} over the registry. */
+	status?(root: string): DaemonStatus;
+	/** Asks a live daemon of this checkout; defaults to {@link exploreViaDaemon}. */
+	ask?(root: string, query: string, timeoutMs: number, registryDir?: string): Promise<DaemonExploreResult>;
 }
 
 /**
@@ -101,7 +110,20 @@ export function exploreOnce(cwd: string, query: string, timeoutMs: number, comma
 	});
 }
 
-/** Makes the project's CodeGraph daemon open its database and start a read worker, so the next real call is fast. */
-export async function warmUpDaemon(cwd: string, timeoutMs: number = WARMUP_TIMEOUT_MS, options: ExploreOnceOptions = {}): Promise<boolean> {
+/**
+ * Makes the project's CodeGraph daemon open its database and start a read worker, so the next real call is fast.
+ * A live daemon already registered for this checkout is reused: one read through it is the warm-up, and no
+ * second server is spawned beside it. Only when this checkout has no live daemon is `codegraph serve --mcp`
+ * started, by {@link exploreOnce}, which never kills the daemon it shares with the user's own sessions. The
+ * answer comes from this checkout's own registry, never from MCP configuration.
+ */
+export async function warmUpDaemon(cwd: string, timeoutMs: number = WARMUP_TIMEOUT_MS, options: WarmOptions = {}): Promise<boolean> {
+	if ((options.status ?? daemonStatus)(cwd) === "live") {
+		const asked = await (options.ask ?? ((root, query, budget, registryDir) => exploreViaDaemon(root, query, budget, { registryDir })))(
+			cwd, WARMUP_QUERY, timeoutMs, options.registryDir,
+		);
+		// A live daemon that does not answer is not doubled: a second server would only be slower.
+		return asked.status === "ok";
+	}
 	return (await exploreOnce(cwd, WARMUP_QUERY, timeoutMs, WARMUP_COMMAND, options)).ok;
 }

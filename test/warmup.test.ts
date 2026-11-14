@@ -93,3 +93,39 @@ test("S18: a stuck server's stdout is released, so it cannot keep the process al
 	assert.equal(killed, false, "the worker never exited after the timeout: a stuck server's stdout kept it alive");
 	assert.equal(code, 0, stderr);
 });
+
+// --- S4: reuse the checkout's live daemon before warming one ---
+
+test("S4: a live daemon of this checkout is reused for the warm-up instead of spawning a server", async () => {
+	// This directory has no index: a spawn here cannot succeed, so a true result proves the daemon was reused.
+	const dir = realpathSync(mkdtempSync(join(tmpdir(), "pcs-warm-reuse-")));
+	const asked: { root: string; query: string }[] = [];
+	assert.equal(await warmUpDaemon(dir, 5_000, {
+		status: () => "live",
+		ask: async (root, query) => { asked.push({ root, query }); return { status: "ok", text: "WARM" }; },
+	}), true);
+	assert.deepEqual(asked, [{ root: dir, query: "main" }], "the live daemon is asked once, for this checkout");
+});
+
+test("S4: a live daemon that does not answer is not doubled by a second server", async () => {
+	const dir = realpathSync(mkdtempSync(join(tmpdir(), "pcs-warm-timeout-live-")));
+	let asked = 0;
+	const started = Date.now();
+	assert.equal(await warmUpDaemon(dir, 3_000, {
+		status: () => "live",
+		ask: async () => { asked++; return { status: "timeout" }; },
+	}), false);
+	assert.equal(asked, 1);
+	assert.ok(Date.now() - started < 2_000, "the caller did not wait for a spawn that must not happen");
+});
+
+test("S4: with no live daemon for this checkout, nothing is asked and the server path runs", async () => {
+	const dir = realpathSync(mkdtempSync(join(tmpdir(), "pcs-warm-none-live-")));
+	let asked = false;
+	// The spawn path is real: a directory without an index cannot be served, so the answer is false.
+	assert.equal(await warmUpDaemon(dir, 1, {
+		status: () => "none",
+		ask: async () => { asked = true; return { status: "ok", text: "X" }; },
+	}), false);
+	assert.equal(asked, false, "a checkout with no live daemon has nothing to ask");
+});
