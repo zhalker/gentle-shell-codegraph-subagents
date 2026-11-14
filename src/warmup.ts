@@ -110,6 +110,9 @@ export function exploreOnce(cwd: string, query: string, timeoutMs: number, comma
 	});
 }
 
+/** A background warm-up (the explorer's) must never hold its caller: a live daemon is asked within this budget. */
+export const WARMUP_BACKGROUND_LIVE_MS = 5_000;
+
 /**
  * Makes the project's CodeGraph daemon open its database and start a read worker, so the next real call is fast.
  * A live daemon already registered for this checkout is reused: one read through it is the warm-up, and no
@@ -119,8 +122,10 @@ export function exploreOnce(cwd: string, query: string, timeoutMs: number, comma
  */
 export async function warmUpDaemon(cwd: string, timeoutMs: number = WARMUP_TIMEOUT_MS, options: WarmOptions = {}): Promise<boolean> {
 	if ((options.status ?? daemonStatus)(cwd) === "live") {
-		const asked = await (options.ask ?? ((root, query, budget, registryDir) => exploreViaDaemon(root, query, budget, { registryDir })))(
-			cwd, WARMUP_QUERY, timeoutMs, options.registryDir,
+		// A fire-and-forget warm-up is bounded tightly: the daemon is already there, and nothing may keep the caller.
+		const budget = options.background === true ? Math.min(timeoutMs, WARMUP_BACKGROUND_LIVE_MS) : timeoutMs;
+		const asked = await (options.ask ?? ((root, query, ms, registryDir) => exploreViaDaemon(root, query, ms, { registryDir })))(
+			cwd, WARMUP_QUERY, budget, options.registryDir,
 		);
 		// A live daemon that does not answer is not doubled: a second server would only be slower.
 		return asked.status === "ok";

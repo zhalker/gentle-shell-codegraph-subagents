@@ -129,3 +129,14 @@ test("S4: with no live daemon for this checkout, nothing is asked and the server
 	}), false);
 	assert.equal(asked, false, "a checkout with no live daemon has nothing to ask");
 });
+
+test("S4/S15: a background warm-up reusing a live daemon stays short, so it never holds its caller", async () => {
+	const dir = realpathSync(mkdtempSync(join(tmpdir(), "pcs-warm-bg-live-")));
+	let budget = -1;
+	assert.equal(await warmUpDaemon(dir, 120_000, {
+		background: true,
+		status: () => "live",
+		ask: async (_root, _query, ms) => { budget = ms; return { status: "ok", text: "WARM" }; },
+	}), true);
+	assert.ok(budget > 0 && budget <= 5_000, `asked with ${budget} ms`);
+});
