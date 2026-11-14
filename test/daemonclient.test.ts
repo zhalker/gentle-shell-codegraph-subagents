@@ -6,7 +6,6 @@ import { existsSync, mkdtempSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DAEMON_HELLO_TIMEOUT_MS, daemonStatus, exploreViaDaemon, liveDaemon, registeredRoot } from "../src/daemonclient.ts";
-import { explorePerCase, prefetchForExplorer } from "../src/prefetch.ts";
 import { warmUpDaemon } from "../src/warmup.ts";
 import { daemonPids, hasCodegraph, indexedProject, stopDaemon } from "./helpers.ts";
 
@@ -155,13 +154,6 @@ test("S18: an MCP reply with isError is unavailable, so its text is never used a
 	try {
 		const registryDir = registry([{ root: ROOT, socketPath: daemon.path }]);
 		assert.deepEqual(await exploreViaDaemon(ROOT, "q", 5_000, { registryDir }), { status: "unavailable" });
-		let warm = 0;
-		const result = await explorePerCase("q", ROOT, {
-			daemon: (query, cwd, timeoutMs) => exploreViaDaemon(cwd, query, timeoutMs, { registryDir }),
-			warm: () => { warm++; return Promise.resolve(true); },
-		});
-		assert.deepEqual(result, { text: undefined, outcome: "skipped-no-daemon" });
-		assert.equal(warm, 1);
 	} finally {
 		daemon.close();
 	}
@@ -260,44 +252,6 @@ test("S15: the project root matches whatever its spelling: trailing separator an
 	}
 });
 
-// --- The per-case composition used by the prefetch ---
-
-test("S15: a live daemon: its text is used and nothing is warmed", async () => {
-	let warm = 0;
-	const result = await explorePerCase("q", ROOT, {
-		daemon: async () => ({ status: "ok", text: "FROM DAEMON" }),
-		warm: () => { warm++; return Promise.resolve(true); },
-	});
-	assert.deepEqual(result, { text: "FROM DAEMON", outcome: "ok" });
-	assert.equal(warm, 0);
-});
-
-test("S15: no usable daemon -> nothing is added at once and the warm-up starts once", async () => {
-	let warm = 0;
-	const started = Date.now();
-	const result = await explorePerCase("q", ROOT, {
-		daemon: async () => ({ status: "unavailable" }),
-		warm: () => { warm++; return new Promise<unknown>(() => { /* never settles */ }); },
-	});
-	assert.deepEqual(result, { text: undefined, outcome: "skipped-no-daemon" });
-	assert.equal(warm, 1);
-	assert.ok(Date.now() - started < 200, "the caller must not wait for the warm-up");
-});
-
-test("S15: a daemon timeout adds nothing and starts no second, warmer attempt", async () => {
-	let warm = 0;
-	const result = await explorePerCase("q", ROOT, { daemon: async () => ({ status: "timeout" }), warm: () => { warm++; return Promise.resolve(true); } });
-	assert.deepEqual(result, { text: undefined, outcome: "daemon-timeout" });
-	assert.equal(warm, 0);
-});
-
-test("S15: a throwing daemon client is logged as daemon-error and still warms once", async () => {
-	let warm = 0;
-	const result = await explorePerCase("q", ROOT, { daemon: async () => { throw new Error("boom"); }, warm: () => { warm++; return Promise.resolve(true); } });
-	assert.deepEqual(result, { text: undefined, outcome: "daemon-error" });
-	assert.equal(warm, 1);
-});
-
 // --- Against the real CodeGraph ---
 
 const norm = (text: string | undefined) => (text ?? "").replace(/\r\n/g, "\n").trim();
@@ -332,48 +286,6 @@ test("S15 real: with no daemon it is unavailable and it does not start one", { s
 		stopDaemon(dir);
 		assert.deepEqual(await exploreViaDaemon(dir, "warmFn1 run", 20_000), { status: "unavailable" });
 		assert.equal(daemonPids(dir).length, 0);
-	} finally {
-		stopDaemon(dir);
-	}
-});
-
-/** The explorer's prefetch as the extension wires it: the daemon answers, or the warm-up starts behind it. */
-function explorerInput(dir: string) {
-	return {
-		env: { GENTLE_PI_AGENTS_CHILD: "1", GENTLE_PI_AGENTS_REQUESTED_TOOLS: "read,grep,mcp__codegraph__codegraph_explore" },
-		prompt: "warmFn1 run",
-		cwd: dir,
-		exists: existsSync,
-		explore: async (query: string, cwd: string) =>
-			(await explorePerCase(query, cwd, {
-				daemon: (q, c, timeoutMs) => exploreViaDaemon(c, q, timeoutMs),
-				warm: (c) => warmUpDaemon(c, undefined, { background: true }),
-			})).text,
-	};
-}
-
-/** Asks the prefetch until its background warm-up has brought a daemon up, or the deadline passes. */
-async function prefetchUntilText(input: ReturnType<typeof explorerInput>, ms: number): Promise<string | undefined> {
-	const deadline = Date.now() + ms;
-	let text: string | undefined;
-	while (Date.now() < deadline) {
-		text = await prefetchForExplorer(input);
-		if (text !== undefined) return text;
-		await new Promise((resolve) => setTimeout(resolve, 250));
-	}
-	return text;
-}
-
-test("S15 real: no daemon: the prefetch adds nothing at once and its background warm-up serves the next one", { skip: !hasCodegraph }, async () => {
-	const dir = indexedProject();
-	try {
-		stopDaemon(dir);
-		const input = explorerInput(dir);
-		const started = Date.now();
-		assert.equal(await prefetchForExplorer(input), undefined, "with no daemon nothing is added");
-		assert.ok(Date.now() - started < 2_000, "the explorer must not wait for the warm-up");
-		const text = await prefetchUntilText(input, 120_000);
-		assert.match(String(text), /warmFn1/, "the next prefetch must find the daemon warm");
 	} finally {
 		stopDaemon(dir);
 	}

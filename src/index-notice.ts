@@ -3,7 +3,6 @@ import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { codegraphTools, CODEGRAPH_MCP_TOOL, mayInitiateIndexWrite, NATIVE_CODEGRAPH_TOOL, type IndexRole } from "./agents.ts";
 import type { AutoIndexResult, IndexAction, PostInitSyncOutcome } from "./autoindex.ts";
-import type { PerCaseOutcome } from "./prefetch.ts";
 import { SKILL_REMINDER_TYPE } from "./skill-reminder.ts";
 
 // A live explorer run had the CodeGraph MCP tool, was told to use it only "in an already indexed workspace",
@@ -69,8 +68,6 @@ export function chooseIndexNotice(input: IndexNoticeInput): string | undefined {
 	return root === undefined ? undefined : indexNotice(root, tools);
 }
 
-/** What the extension can record for one explorer prefetch: its own cases plus a held init lock, which skips it. */
-export type PrefetchOutcome = PerCaseOutcome | "skipped-init-running";
 
 export interface IndexNotice {
 	text: string;
@@ -174,13 +171,6 @@ function appendLog(dir: string, file: string, entry: { cwd: string; outcome: str
 
 const DEFAULT_LOG_DIR = () => join(homedir(), ".pi", "agent", "codegraph-subagents");
 
-/** Appends one line per explorer prefetch, so a failure that the model never sees can still be diagnosed. */
-export function logPrefetch(
-	entry: { cwd: string; outcome: PrefetchOutcome; ms: number },
-	dir: string = DEFAULT_LOG_DIR(),
-): void {
-	appendLog(dir, "prefetch.log", entry);
-}
 
 /**
  * Appends one line per compaction sync request. A compaction sync never notifies the session, not even when it
@@ -199,7 +189,6 @@ export interface FirstPromptParts {
 	/** The codegraph-workflow skill reminder, when this prompt gets one. */
 	reminder?: string;
 	/** The CodeGraph pre-fetch of an explorer child, when it produced anything. */
-	prefetch?: string;
 	child: boolean;
 	/** The session was compacted before: this message brings back what the summary dropped, never displayed. */
 	afterCompaction?: boolean;
@@ -220,9 +209,8 @@ export function firstPromptMessage(input: FirstPromptParts): PromptMessage | und
 	const part = (text: string | undefined): string | undefined => (text !== undefined && text.length > 0 ? text : undefined);
 	const notice = part(input.notice);
 	const reminder = part(input.reminder);
-	const prefetch = part(input.prefetch);
-	const content = [notice, reminder, prefetch].filter((text): text is string => text !== undefined).join("\n\n");
+	const content = [notice, reminder].filter((text): text is string => text !== undefined).join("\n\n");
 	if (content.length === 0) return undefined;
-	const customType = reminder !== undefined ? SKILL_REMINDER_TYPE : notice !== undefined ? INDEX_NOTICE_TYPE : "codegraph-prefetch";
+	const customType = reminder !== undefined ? SKILL_REMINDER_TYPE : INDEX_NOTICE_TYPE;
 	return { customType, content, display: !input.child && input.afterCompaction !== true && notice !== undefined };
 }

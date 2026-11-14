@@ -3,7 +3,6 @@ import { copyFileSync } from "node:fs";
 import { join } from "node:path";
 import { mayInitiateIndexWrite, sessionIndexRole } from "./agents.ts";
 import { codegraphWritingIndex, type InitLock } from "./initlock.ts";
-import { killTree } from "./prefetch.ts";
 import { projectArgument } from "./daemonclient.ts";
 import { codegraphSpawn } from "./paths.ts";
 import { seedWorktreeIndex, worktreeIndexAction, worktreeOf } from "./seed.ts";
@@ -17,6 +16,17 @@ export const SYNC_TIMEOUT_MS = 120_000;
 export const INIT_TIMEOUT_MS = 600_000;
 
 /** The environment variable a subagent child carries; children never start an index operation of their own. */
+/** Kills a child and its tree, without ever throwing: the caller is already finishing a run. */
+export function killTree(pid: number | undefined, child: { kill(): boolean }): void {
+	if (process.platform === "win32" && pid !== undefined) {
+		try {
+			spawn("taskkill", ["/pid", String(pid), "/T", "/F"], { windowsHide: true, stdio: "ignore" }).on("error", () => {});
+			return;
+		} catch { /* fall through */ }
+	}
+	try { child.kill(); } catch { /* already gone */ }
+}
+
 export const CHILD_ENV = "GENTLE_PI_AGENTS_CHILD";
 
 export type IndexAction = "sync" | "init" | "seed" | "none";

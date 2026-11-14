@@ -14,7 +14,6 @@ import {
 	INDEX_NOTICE_MARKER,
 	INDEX_NOTICE_TYPE,
 	indexNotice,
-	logPrefetch,
 	noticeTools,
 	indexOutcomeNotice,
 	indexStartNotice,
@@ -118,58 +117,17 @@ test("S1: the notice asks for the tools first and says how to search when CodeGr
 	assert.match(notice, /grep for string literals/);
 });
 
-test("S1: one log line per prefetch, tab separated: ISO time, outcome, Nms, cwd", (t) => {
-	const dir = join(scratchDir(t), "nested", "codegraph-subagents");
-	logPrefetch({ cwd: "C:\\project", outcome: "daemon-timeout", ms: 60_001 }, dir);
-	logPrefetch({ cwd: "\\\\server\\share", outcome: "skipped-init-running", ms: 3 }, dir);
-	const lines = readFileSync(join(dir, "prefetch.log"), "utf8").split("\n");
-	assert.equal(lines.length, 3, "each call appends one line; the file ends in a newline");
-	assert.deepEqual(lines.slice(0, 2).map((line) => line.split("\t").length), [4, 4]);
-	const [time, outcome, ms, cwd] = lines[0].split("\t");
-	assert.match(time, /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/, "an ISO timestamp");
-	assert.ok(!Number.isNaN(Date.parse(time)));
-	assert.equal(outcome, "daemon-timeout");
-	assert.equal(ms, "60001ms");
-	assert.equal(cwd, "C:\\project");
-	assert.match(lines[1], /^[^\t]+\tskipped-init-running\t3ms\t\\\\server\\share$/);
-});
-
-test("S1: a directory name with tabs or line breaks stays inside its own line and field", (t) => {
-	const dir = scratchDir(t);
-	logPrefetch({ cwd: "/srv/a\tb\nc\r\nd\u0000e", outcome: "ok", ms: 1 }, dir);
-	logPrefetch({ cwd: "/srv/x\n2026-01-01T00:00:00.000Z\tok\t1ms\t/forged", outcome: "empty", ms: 2 }, dir);
-	const lines = readFileSync(join(dir, "prefetch.log"), "utf8").split("\n");
-	assert.equal(lines.length, 3, "two calls, two lines");
-	assert.deepEqual(lines.slice(0, 2).map((line) => line.split("\t").length), [4, 4]);
-	assert.equal(lines[0].split("\t")[3], "/srv/a?b?c??d?e");
-	assert.equal(lines[1].split("\t")[1], "empty");
-	assert.equal(lines[1].split("\t")[3], "/srv/x?2026-01-01T00:00:00.000Z?ok?1ms?/forged");
-});
-
-test("S1: logging never breaks a prompt, even when the log directory cannot be created", (t) => {
-	const file = join(scratchDir(t), "not-a-directory");
-	writeFileSync(file, "keep");
-	assert.doesNotThrow(() => logPrefetch({ cwd: "C:\\project", outcome: "ok", ms: 1 }, file));
-	assert.doesNotThrow(() => logPrefetch({ cwd: "C:\\project", outcome: "ok", ms: 1 }, join(file, "nested")));
-	assert.equal(readFileSync(file, "utf8"), "keep");
-});
-
-test("S1: the first prompt carries the notice, the skill reminder and the prefetch as one message", () => {
+test("S1: the first prompt carries the notice and the skill reminder as one message", () => {
 	const notice = `${INDEX_NOTICE_MARKER} this workspace has an index`;
 	const reminder = "For applicable code tasks, read and follow the codegraph-workflow skill.";
-	const prefetch = "CodeGraph pre-fetch for your task";
-	const joined = `${notice}\n\n${reminder}\n\n${prefetch}`;
 
 	assert.equal(firstPromptMessage({ child: false }), undefined, "nothing to say");
-	assert.equal(firstPromptMessage({ child: false, notice: "", reminder: "", prefetch: undefined }), undefined, "empty parts say nothing");
+	assert.equal(firstPromptMessage({ child: false, notice: "", reminder: "" }), undefined, "empty parts say nothing");
 	assert.deepEqual(firstPromptMessage({ child: false, notice }), { customType: INDEX_NOTICE_TYPE, content: notice, display: true });
 	assert.deepEqual(firstPromptMessage({ child: true, notice }), { customType: INDEX_NOTICE_TYPE, content: notice, display: false }, "children keep it hidden");
 	assert.deepEqual(firstPromptMessage({ child: false, reminder }), { customType: SKILL_REMINDER_TYPE, content: reminder, display: false });
-	assert.deepEqual(firstPromptMessage({ child: false, prefetch }), { customType: "codegraph-prefetch", content: prefetch, display: false });
-	assert.deepEqual(firstPromptMessage({ child: true, reminder, prefetch }), { customType: SKILL_REMINDER_TYPE, content: `${reminder}\n\n${prefetch}`, display: false });
-	assert.deepEqual(firstPromptMessage({ child: false, notice, reminder, prefetch }), { customType: SKILL_REMINDER_TYPE, content: joined, display: true });
-	assert.deepEqual(firstPromptMessage({ child: true, notice, reminder, prefetch }), { customType: SKILL_REMINDER_TYPE, content: joined, display: false });
-	assert.deepEqual(firstPromptMessage({ child: false, notice, prefetch }), { customType: INDEX_NOTICE_TYPE, content: `${notice}\n\n${prefetch}`, display: true });
+	assert.deepEqual(firstPromptMessage({ child: true, notice, reminder }), { customType: SKILL_REMINDER_TYPE, content: `${notice}\n\n${reminder}`, display: false });
+	assert.deepEqual(firstPromptMessage({ child: false, notice, reminder }), { customType: SKILL_REMINDER_TYPE, content: `${notice}\n\n${reminder}`, display: true });
 });
 
 test("S4: a cwd spelled as the administrative share finds the index of the same project", (t) => {	const root = indexedDir(t);

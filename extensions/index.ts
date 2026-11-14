@@ -7,10 +7,8 @@ import { readExposureWarning, readMissingServerWarning } from "../src/apply.ts";
 import { sessionIndexRole } from "../src/agents.ts";
 import { linkedWorktrees, prepareProject, runCodegraph, seedLinkedWorktrees, syncAfterNativeInit, type SessionStartReason } from "../src/autoindex.ts";
 import { compactionSync, realSyncLock } from "../src/compaction-sync.ts";
-import { exploreViaDaemon } from "../src/daemonclient.ts";
-import { codegraphWritingIndex, isInitLocked, isInitRunning, realInitLock } from "../src/initlock.ts";
-import { chooseIndexNotice, firstPromptMessage, INDEX_NOTICE_TYPE, indexOutcomeNotice, indexStartNotice, initHookDecision, logPrefetch, logSync, noticeTools, postInitSyncNotice, warmOutcomeNotice, type PrefetchOutcome } from "../src/index-notice.ts";
-import { explorePerCase, prefetchForExplorer } from "../src/prefetch.ts";
+import { codegraphWritingIndex, isInitLocked, realInitLock } from "../src/initlock.ts";
+import { chooseIndexNotice, firstPromptMessage, INDEX_NOTICE_TYPE, indexOutcomeNotice, indexStartNotice, initHookDecision, logSync, noticeTools, postInitSyncNotice, warmOutcomeNotice} from "../src/index-notice.ts";
 import { messageText, promptContext, promptMessageLine } from "../src/prompt-context.ts";
 import { warmUpDaemon } from "../src/warmup.ts";
 import { repairFrozenAgentFiles, repairNotices, settleAgentFileRepairs, type RepairOutcome } from "../src/repair.ts";
@@ -140,7 +138,7 @@ export default function (pi: ExtensionAPI) {
 
 	// The first-prompt message as one short line that expands to the full text; what the model gets is unchanged.
 	// Only displayed messages are drawn, so a message sent again after a compaction never shows.
-	for (const customType of [SKILL_REMINDER_TYPE, INDEX_NOTICE_TYPE, "codegraph-prefetch"]) {
+	for (const customType of [SKILL_REMINDER_TYPE, INDEX_NOTICE_TYPE]) {
 		pi.registerMessageRenderer?.(customType, (message, options, theme) => {
 			const line = promptMessageLine(messageText(message.content), options.expanded, options.keyHint("app.tools.expand", options.expanded ? "to collapse" : "to expand"));
 			return new Text(theme.fg("customMessageText", line), options.outputPad, 0);
@@ -217,32 +215,7 @@ export default function (pi: ExtensionAPI) {
 			});
 			// The loaded context files are not inspected: a conflicting rule is neither detected nor reported.
 			if (isUserPrompt) firstPromptSeen = true;
-			const prompt = isUserPrompt ? event.prompt : undefined;
-			// Whatever the prefetch answers, its outcome goes to the log; a prompt never waits for it.
-			let outcome: PrefetchOutcome | undefined;
-			const started = Date.now();
-			const content = await prefetchForExplorer({
-				env: process.env,
-				prompt,
-				cwd: ctx.cwd,
-				exists: existsSync,
-				initRunning: (cwd) => {
-					// Only an init creates the database; a sync of an existing index leaves the prefetch to do its work.
-					const held = isInitRunning(cwd);
-					if (held) outcome = "skipped-init-running";
-					return held;
-				},
-				explore: async (query, cwd) => {
-					const result = await explorePerCase(query, cwd, {
-						daemon: (q, c, timeoutMs) => exploreViaDaemon(c, q, timeoutMs),
-						warm: (c) => warmUpDaemon(c, undefined, { background: true }),
-					});
-					outcome = result.outcome;
-					return result.text;
-				},
-			});
-			if (outcome !== undefined) logPrefetch({ cwd: ctx.cwd, outcome, ms: Date.now() - started });
-			const message = firstPromptMessage({ notice, reminder, prefetch: content, child, afterCompaction: state.afterCompaction });
+			const message = firstPromptMessage({ notice, reminder, child, afterCompaction: state.afterCompaction });
 			return message === undefined ? undefined : { message };
 		} catch {
 			return undefined;
