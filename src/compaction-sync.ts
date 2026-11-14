@@ -5,7 +5,7 @@ import { join } from "node:path";
 import {
 	CHILD_ENV,
 	planIndexAction,
-	runSyncAttempt,
+	requestCoordinatedSync,
 	type SyncAttemptResult,
 	type SyncCoordinator,
 	type SyncRunOutcome,
@@ -291,7 +291,7 @@ class FileSyncCoordinator implements SyncCoordinator {
 	 * inside it leaves every pending request for the next session, and the lease is only released under the gate
 	 * once nothing is pending, so a request cannot fall between the last check and the release.
 	 */
-	private async runAsRunner(state: string, project: string, token: string, attempt: (onSpawn: SyncSpawn) => Promise<SyncAttemptResult>): Promise<RunnerResult> {
+	private async runAsRunner(state: string, _project: string, token: string, attempt: (onSpawn: SyncSpawn) => Promise<SyncAttemptResult>): Promise<RunnerResult> {
 		try {
 			for (;;) {
 				const served = await withGate(state, this.options, () => {
@@ -380,9 +380,11 @@ export async function compactionSync(input: CompactionSyncInput): Promise<{ outc
 async function decide(input: CompactionSyncInput): Promise<CompactionSyncOutcome> {
 	if (input.env[CHILD_ENV] === "1") return "skipped-child";
 	if (planIndexAction(input.cwd, input.exists) !== "sync") return "skipped-no-index";
-	const outcome = await input.sync.request(input.cwd, (onSpawn) => runSyncAttempt(input, onSpawn));
-	if (outcome.status === "ran") return outcome.ok ? "synced" : "failed";
-	if (outcome.status === "coalesced") return "coalesced";
-	if (outcome.status === "queued") return "queued";
-	return "skipped-coordination-unavailable";
+	// The same coordinated request the startup and post-init syncs use: one lease, the index lock for the run.
+	const outcome = await requestCoordinatedSync({ project: input.cwd, sync: input.sync, lock: input.lock, run: input.run });
+	if (outcome === "synced") return "synced";
+	if (outcome === "coalesced") return "coalesced";
+	if (outcome === "pending") return "queued";
+	if (outcome === "unavailable") return "skipped-coordination-unavailable";
+	return "failed";
 }

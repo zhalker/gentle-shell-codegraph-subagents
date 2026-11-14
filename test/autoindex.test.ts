@@ -332,7 +332,8 @@ test("S17: while another session holds the init lock, an existing .codegraph is 
 test("S17: with no init lock held an existing index is synced as always", async () => {
 	const log: string[] = [];
 	const result = await autoIndex({ cwd: CWD, env: {}, reason: "startup", exists: withFiles(".codegraph"), lock: fakeLock(log, false), run: async (args) => { log.push(`run:${args[0]}`); return true; } });
-	assert.deepEqual(log, ["lock:isHeld", "run:sync"]);
+	// Since S2 the write is coordinated even without a lease: the index lock is taken around the run.
+	assert.deepEqual(log, ["lock:isHeld", "lock:acquire", "run:sync", "lock:release"]);
 	assert.deepEqual(result, { action: "sync", ok: true });
 });
 

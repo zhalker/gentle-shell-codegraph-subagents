@@ -36,6 +36,49 @@ export type SyncRunOutcome =
 /** Called with the process the sync started, so the coordination can tell a run that ended from one that went on. */
 export type SyncSpawn = (pid: number, options?: { proxy?: boolean }) => void;
 
+/**
+ * What one coordinated sync request achieved, in terms that never overstate it: `synced` only for a run that
+ * came back successfully, `coalesced` only for another session's run that started after this request and
+ * completed, `pending` for a request that is recorded but has not run, `unavailable` for state that could not be
+ * used at all, and `failed` for a run that came back with an error.
+ */
+export type CoordinatedSyncOutcome = "synced" | "coalesced" | "pending" | "failed" | "unavailable";
+
+/** The honest reading of one coordination result. */
+export function coordinatedSyncOutcome(outcome: SyncRunOutcome): CoordinatedSyncOutcome {
+	if (outcome.status === "ran") return outcome.ok ? "synced" : "failed";
+	if (outcome.status === "coalesced") return "coalesced";
+	if (outcome.status === "queued") return "pending";
+	return "unavailable";
+}
+
+/** The honest reading of one attempt made under the index lock alone, with no lease to wait on. */
+export function attemptOutcome(attempt: SyncAttemptResult): CoordinatedSyncOutcome {
+	if (!attempt.ran) return "pending";
+	return attempt.ok ? "synced" : "failed";
+}
+
+export interface SyncRequestInput {
+	/** The project whose index is synced. */
+	project: string;
+	/** The per-project sync coordination shared with the other sessions of this user. */
+	sync: SyncCoordinator;
+	/** The package's index lock: a sync and an init of one project never run at the same time. */
+	lock?: InitLock;
+	run(args: string[], cwd: string, timeoutMs: number, onSpawn?: (pid: number, options?: { proxy?: boolean }) => void): Promise<boolean>;
+}
+
+/**
+ * Asks the coordination for one sync of `project` and reports what it achieved. The run itself happens through
+ * {@link runSyncAttempt}, so it holds the package's index lock: nothing here can start an uncoordinated write.
+ * Never throws on its own; a failing command comes back as `failed`.
+ */
+export async function requestCoordinatedSync(input: SyncRequestInput): Promise<CoordinatedSyncOutcome> {
+	const outcome = await input.sync.request(input.project, (onSpawn) =>
+		runSyncAttempt({ cwd: input.project, lock: input.lock, run: input.run }, onSpawn));
+	return coordinatedSyncOutcome(outcome);
+}
+
 /** One attempt under the coordination: it ran the command, or the index was locked and nothing ran. */
 export type SyncAttemptResult = { ran: true; ok: boolean } | { ran: false };
 
@@ -147,12 +190,18 @@ export async function autoIndex(input: AutoIndexInput): Promise<AutoIndexResult>
 			// A sync holding it is different: the index exists, so this request is coalesced into it instead.
 			if (input.lock?.isHeld(input.cwd) && (input.lock.isInitRunning?.(input.cwd) ?? true)) return { action, ok: true, joined: true };
 			announce();
-			if (input.sync === undefined) return { action, ok: await input.run(["sync", "-q"], input.cwd, SYNC_TIMEOUT_MS) };
-			const outcome = await input.sync.request(input.cwd, (onSpawn) => runSyncAttempt(input, onSpawn));
-			if (outcome.status === "ran") return { action, ok: outcome.ok };
-			if (outcome.status === "coalesced") return { action, ok: true, coalesced: true };
-			if (outcome.status === "queued") return { action, ok: true, queued: true };
-			return { action, ok: false, unavailable: true };
+			// Every write goes through the coordination: the shared lease when there is one, and always through
+			// the package's index lock, so an init cannot begin in the middle of this sync (nor this one inside an
+			// init). Without a coordination (a unit test) the lock alone decides, and a locked index leaves the
+			// request pending instead of syncing beside another writer.
+			const outcome = input.sync === undefined
+				? attemptOutcome(await runSyncAttempt(input, () => {}))
+				: await requestCoordinatedSync({ project: input.cwd, sync: input.sync, lock: input.lock, run: input.run });
+			if (outcome === "synced") return { action, ok: true };
+			if (outcome === "coalesced") return { action, ok: true, coalesced: true };
+			if (outcome === "pending") return { action, ok: true, queued: true };
+			if (outcome === "unavailable") return { action, ok: false, unavailable: true };
+			return { action, ok: false };
 		}
 		const attempt = input.lock?.acquire(input.cwd);
 		if (attempt?.status === "busy") return { action, ok: true, joined: true };
@@ -177,6 +226,62 @@ export async function autoIndex(input: AutoIndexInput): Promise<AutoIndexResult>
 	} catch {
 		return { action: planIndexAction(input.cwd, input.exists), ok: false };
 	}
+}
+
+export interface LinkedWorktreeSeedInput {
+	/** The linked worktrees of one repository, as `git worktree list --porcelain` reports them. */
+	worktrees: readonly string[];
+	/** One init per project across sessions; absent means no coordination (the unit tests). */
+	lock?: InitLock;
+	exists(path: string): boolean;
+	/** Whether the main checkout's index of this worktree is being written right now. */
+	sourceBusy(commonRoot: string): boolean;
+	/** Copies the seed db from the main checkout into the worktree. */
+	copy(from: string, to: string): boolean;
+}
+
+export interface LinkedWorktreeSeedResult {
+	/** The worktrees whose own index was seeded, one db path each. */
+	seeded: string[];
+	/** Every worktree that was left alone, with why (already indexed, not a worktree, busy, or a failed copy). */
+	skipped: { worktree: string; reason: string }[];
+}
+
+/**
+ * Seeds the unindexed linked worktrees of one repository, each one under its own index lock, exactly like the
+ * per-directory seed of {@link autoIndex}: a worktree whose index another session is writing is left alone, a
+ * fresh decision is taken once the lock is held, and a failed copy leaves nothing behind. The main checkout is
+ * never seeded (it is not a worktree). Never throws.
+ */
+export function seedLinkedWorktrees(input: LinkedWorktreeSeedInput): LinkedWorktreeSeedResult {
+	const result: LinkedWorktreeSeedResult = { seeded: [], skipped: [] };
+	for (const root of input.worktrees) {
+		try {
+			const found = worktreeOf(root);
+			if (!found.worktree) continue; // the main checkout and anything not linked is not our business here
+			if (input.exists(join(root, ".codegraph"))) { result.skipped.push({ worktree: root, reason: "already has an index" }); continue; }
+			const attempt = input.lock?.acquire(root, { kind: "init" });
+			if (attempt?.status === "busy") { result.skipped.push({ worktree: root, reason: "another session is writing this worktree's index" }); continue; }
+			try {
+				// Judged again under the lock: another session may have seeded it while this one waited.
+				if (input.exists(join(root, ".codegraph"))) { result.skipped.push({ worktree: root, reason: "already has an index" }); continue; }
+				if (input.sourceBusy(found.commonRoot)) { result.skipped.push({ worktree: root, reason: "the main checkout's index is being written" }); continue; }
+				const seeded = seedWorktreeIndex({
+					worktree: root,
+					commonRoot: found.commonRoot,
+					sourceBusy: () => input.sourceBusy(found.commonRoot),
+					copy: input.copy,
+				});
+				if (seeded) result.seeded.push(join(root, ".codegraph", "codegraph.db"));
+				else result.skipped.push({ worktree: root, reason: "the seed copy failed" });
+			} finally {
+				attempt?.release();
+			}
+		} catch (error) {
+			result.skipped.push({ worktree: root, reason: `unexpected: ${(error as Error).message}` });
+		}
+	}
+	return result;
 }
 
 /** The seed copy for real runs: a plain file copy of the db, staged by {@link seedWorktreeIndex}. */

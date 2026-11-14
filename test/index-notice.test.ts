@@ -16,6 +16,9 @@ import {
 	indexNotice,
 	logPrefetch,
 	noticeTools,
+	indexOutcomeNotice,
+	indexStartNotice,
+	warmOutcomeNotice,
 } from "../src/index-notice.ts";
 import { SKILL_REMINDER_TYPE } from "../src/skill-reminder.ts";
 import { adminShareOf } from "./helpers.ts";
@@ -169,8 +172,7 @@ test("S1: the first prompt carries the notice, the skill reminder and the prefet
 	assert.deepEqual(firstPromptMessage({ child: false, notice, prefetch }), { customType: INDEX_NOTICE_TYPE, content: `${notice}\n\n${prefetch}`, display: true });
 });
 
-test("S4: a cwd spelled as the administrative share finds the index of the same project", (t) => {
-	const root = indexedDir(t);
+test("S4: a cwd spelled as the administrative share finds the index of the same project", (t) => {	const root = indexedDir(t);
 	mkdirSync(join(root, "src"), { recursive: true });
 	const cwd = adminShareOf(join(root, "src"));
 	const expected = adminShareOf(root);
@@ -180,4 +182,54 @@ test("S4: a cwd spelled as the administrative share finds the index of the same 
 	}
 	assert.equal(findIndexRoot(cwd), expected);
 	assert.ok(chooseIndexNotice({ cwd, child: false, selectedTools: ["codegraph"], isUserPrompt: true, alreadySent: false }));
+});
+
+// --- S2/S6: the notices name the action really taken, and never present a pending or failed write as synced ---
+
+test("S2: the start of each action names that action, so create-or-sync is visible while it happens", () => {
+	assert.match(indexStartNotice("init"), /creating the CodeGraph index/);
+	assert.match(indexStartNotice("seed"), /seeding this worktree's CodeGraph index/);
+	assert.match(indexStartNotice("sync"), /syncing the CodeGraph index/);
+	assert.deepEqual([indexStartNotice("init"), indexStartNotice("seed"), indexStartNotice("sync")].length, 3);
+});
+
+test("S2: only a run that came back is reported as synced, created or seeded", () => {
+	assert.deepEqual(indexOutcomeNotice({ action: "sync", ok: true }, "C:\\p"), { text: "CodeGraph index synced", level: "info" });
+	assert.deepEqual(indexOutcomeNotice({ action: "init", ok: true }, "C:\\p"), { text: "CodeGraph index created", level: "info" });
+	assert.deepEqual(indexOutcomeNotice({ action: "seed", ok: true }, "C:\\p"), { text: "CodeGraph index seeded from the main repo and synced", level: "info" });
+});
+
+test("S2/S6: a queued, joined or coalesced request is never presented as a sync of this session", () => {
+	const queued = indexOutcomeNotice({ action: "sync", ok: true, queued: true }, "C:\\p");
+	assert.match(queued.text, /queued, not run yet/);
+	assert.doesNotMatch(queued.text, /synced/i);
+
+	const coalesced = indexOutcomeNotice({ action: "sync", ok: true, coalesced: true }, "C:\\p");
+	assert.match(coalesced.text, /another session's run completed/);
+	assert.doesNotMatch(coalesced.text, /^CodeGraph index synced$/);
+
+	const joinedInit = indexOutcomeNotice({ action: "init", ok: true, joined: true }, "C:\\p");
+	assert.match(joinedInit.text, /another session is creating the CodeGraph index/);
+	const joinedSync = indexOutcomeNotice({ action: "sync", ok: true, joined: true }, "C:\\p");
+	assert.match(joinedSync.text, /this session did not sync it/);
+	assert.doesNotMatch(joinedSync.text, /^CodeGraph index synced$/);
+});
+
+test("S6: unusable coordination is a warning that says no sync was started, not a synced index", () => {
+	const notice = indexOutcomeNotice({ action: "sync", ok: false, unavailable: true }, "C:\\p");
+	assert.deepEqual(notice, { text: "could not coordinate the CodeGraph index sync in C:\\p; no sync was started", level: "warning" });
+});
+
+test("S6: a failed command is a warning naming the action, and never says the index is up to date", () => {
+	for (const action of ["sync", "init", "seed"] as const) {
+		const notice = indexOutcomeNotice({ action, ok: false }, "C:\\p");
+		assert.equal(notice.level, "warning");
+		assert.match(notice.text, new RegExp(`codegraph ${action} failed in C:\\\\p`));
+		assert.match(notice.text, /the index is not up to date/);
+	}
+});
+
+test("S6: the warm-up outcome is reported apart from the index's", () => {
+	assert.deepEqual(warmOutcomeNotice("ok", "C:\\p"), { text: "CodeGraph ready", level: "info" });
+	assert.deepEqual(warmOutcomeNotice("failed", "C:\\p"), { text: "CodeGraph warm-up failed in C:\\p", level: "warning" });
 });

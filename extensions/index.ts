@@ -1,17 +1,17 @@
 import { copyFileSync, existsSync } from "node:fs";
+import { spawnSync } from "node:child_process";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { getAgentDir, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { applyCodegraphSubagents, readExposureWarning, readMissingServerWarning } from "../src/apply.ts";
-import { prepareProject, runCodegraph, type SessionStartReason } from "../src/autoindex.ts";
+import { prepareProject, runCodegraph, seedLinkedWorktrees, type SessionStartReason } from "../src/autoindex.ts";
 import { compactionSync, realSyncLock } from "../src/compaction-sync.ts";
 import { exploreViaDaemon } from "../src/daemonclient.ts";
-import { realInitLock, isInitRunning } from "../src/initlock.ts";
-import { chooseIndexNotice, firstPromptMessage, INDEX_NOTICE_TYPE, logPrefetch, logSync, noticeTools, type PrefetchOutcome } from "../src/index-notice.ts";
+import { codegraphWritingIndex, isInitLocked, isInitRunning, realInitLock } from "../src/initlock.ts";
+import { chooseIndexNotice, firstPromptMessage, INDEX_NOTICE_TYPE, indexOutcomeNotice, indexStartNotice, logPrefetch, logSync, noticeTools, warmOutcomeNotice, type PrefetchOutcome } from "../src/index-notice.ts";
 import { explorePerCase, prefetchForExplorer } from "../src/prefetch.ts";
 import { messageText, promptContext, promptMessageLine } from "../src/prompt-context.ts";
-import { seedSessionWorktrees } from "../src/session-seed.ts";
 import { seedWorktreeIndex } from "../src/seed.ts";
 import { worktreeOf } from "../src/worktree.ts";
 import { warmUpDaemon } from "../src/warmup.ts";
@@ -41,29 +41,64 @@ function startAutoIndex(reason: SessionStartReason, ctx: ExtensionContext): void
 		lock: realInitLock,
 		sync: realSyncLock,
 		warm: (cwd) => warmUpDaemon(cwd),
-		onStart: (action) => say(
-			action === "init" ? "creating the CodeGraph index of this project..."
-				: action === "seed" ? "seeding this worktree's CodeGraph index from the main repo's index..."
-				: "syncing the CodeGraph index...", "info"),
+		onStart: (action) => say(indexStartNotice(action), "info"),
 		onIndexed: (result) => {
-			if (result.joined) say("another session is creating the CodeGraph index of this project", "info");
-			else if (result.coalesced) say("another session is syncing the CodeGraph index of this project", "info");
-			else if (result.queued) say("the CodeGraph index sync is waiting for the index to be free", "info");
-			else if (result.unavailable) say(`could not coordinate the CodeGraph index sync in ${ctx.cwd}`, "warning");
-			else if (!result.ok) say(`codegraph ${result.action} failed in ${ctx.cwd}`, "warning");
-			else say(result.action === "init" ? "CodeGraph index created"
-				: result.action === "seed" ? "CodeGraph index seeded from the main repo and synced"
-				: "CodeGraph index synced", "info");
+			const notice = indexOutcomeNotice(result, ctx.cwd);
+			say(notice.text, notice.level);
 		},
 		onWarmStart: () => say("warming up CodeGraph...", "info"),
 	})
 		.then((result) => {
-			if (result.warm === "ok") say("CodeGraph ready", "info");
-			else if (result.warm === "failed") say(`CodeGraph warm-up failed in ${ctx.cwd}`, "warning");
+			if (result.warm === "skipped") return;
+			const notice = warmOutcomeNotice(result.warm, ctx.cwd);
+			say(notice.text, notice.level);
 		})
 		.catch(() => {
 			// The session may already be gone; nothing to report to.
 		});
+}
+
+/** The linked worktrees of this repository, as one short `git worktree list` reports them. */
+function linkedWorktrees(cwd: string): string[] {
+	try {
+		const found = worktreeOf(cwd);
+		const repoRoot = found.worktree ? found.commonRoot : cwd;
+		const run = spawnSync("git", ["worktree", "list", "--porcelain"], { cwd: repoRoot, encoding: "utf8" });
+		if (run.status !== 0 || typeof run.stdout !== "string") return [];
+		return run.stdout
+			.split("\n")
+			.filter((line) => line.startsWith("worktree "))
+			.map((line) => line.slice("worktree ".length).trim())
+			.filter((root) => root.length > 0);
+	} catch {
+		return [];
+	}
+}
+
+/**
+ * Seeds this repository's unindexed linked worktrees in the background, so the index exists before the first
+ * subagent child is handed one. Every seed takes the worktree's own index lock: a worktree another session is
+ * writing is left alone instead of being copied into, whatever the other writer is doing.
+ */
+function seedSessionWorktrees(ctx: ExtensionContext): void {
+	void Promise.resolve().then(() => {
+		const started = Date.now();
+		const result = seedLinkedWorktrees({
+			worktrees: linkedWorktrees(ctx.cwd),
+			lock: realInitLock,
+			exists: existsSync,
+			sourceBusy: (root) => isInitLocked(root) || codegraphWritingIndex(root),
+			copy: (from, to) => {
+				try { copyFileSync(from, to); return true; } catch { return false; }
+			},
+		});
+		// Nothing is announced: a worktree that cannot be seeded costs nothing. A seed that did not happen for a
+		// coordination reason or a failed copy is still recorded, so it can be diagnosed.
+		for (const entry of result.skipped) {
+			if (entry.reason === "already has an index") continue;
+			logSync({ cwd: entry.worktree, outcome: `seed-skipped: ${entry.reason}`, ms: Date.now() - started });
+		}
+	}).catch(() => {});
 }
 
 // Reapplied on every session start so a reinstall (pi install, gentle-shell install)
@@ -108,11 +143,7 @@ export default function (pi: ExtensionAPI) {
 		startAutoIndex(event.reason, ctx);
 		// Seed the session repo's unindexed worktrees in the background, so the index exists before the first
 		// subagent child is handed one. Never waits, never announces: a skipped worktree costs nothing.
-		if (event.reason !== "reload") {
-			void Promise.resolve().then(() => seedSessionWorktrees({ cwd: ctx.cwd, exists: existsSync, sourceBusy: () => isInitRunning(ctx.cwd), copy: (from, to) => {
-				try { copyFileSync(from, to); return true; } catch { return false; }
-			} })).catch(() => {});
-		}
+		if (event.reason !== "reload") seedSessionWorktrees(ctx);
 		// The precise hook, when it exists: gentle-pi emits its session worktree registry event on Pi's shared
 		// extension event bus every time a worktree joins the session's working set (explicit register today).
 		// Subscribing here makes seeding event-driven instead of scan-driven. The channel is still gentle-pi's
@@ -124,9 +155,7 @@ export default function (pi: ExtensionAPI) {
 				try {
 					const e = payload as { sessionId?: unknown } | undefined;
 					if (!e || e.sessionId !== ctx.sessionManager.getSessionId()) return;
-					void Promise.resolve().then(() => seedSessionWorktrees({ cwd: ctx.cwd, exists: existsSync, sourceBusy: () => isInitRunning(ctx.cwd), copy: (from, to) => {
-						try { copyFileSync(from, to); return true; } catch { return false; }
-					} })).catch(() => {});
+					seedSessionWorktrees(ctx);
 				} catch { /* a failed event-driven seed just falls back to the next scan */ }
 			});
 			if (typeof unsubscribeWorktreeEvent === "function") pi.on("session_shutdown", () => unsubscribeWorktreeEvent());

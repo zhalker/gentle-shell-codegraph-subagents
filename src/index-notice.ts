@@ -2,6 +2,7 @@ import { appendFileSync, existsSync, mkdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { CODEGRAPH_MCP_TOOL } from "./agents.ts";
+import type { AutoIndexResult, IndexAction } from "./autoindex.ts";
 import type { PerCaseOutcome } from "./prefetch.ts";
 import { SKILL_REMINDER_TYPE } from "./skill-reminder.ts";
 
@@ -75,6 +76,51 @@ export function chooseIndexNotice(input: IndexNoticeInput): string | undefined {
 
 /** What the extension can record for one explorer prefetch: its own cases plus a held init lock, which skips it. */
 export type PrefetchOutcome = PerCaseOutcome | "skipped-init-running";
+
+export interface IndexNotice {
+	text: string;
+	level: "info" | "warning";
+}
+
+/**
+ * What the index preparation is doing, said before it starts. Create-or-sync is one policy, and the wording
+ * names which of the three actions this session took: an init, a worktree seed, or a sync of an existing index.
+ */
+export function indexStartNotice(action: Exclude<IndexAction, "none">): string {
+	if (action === "init") return "creating the CodeGraph index of this project...";
+	if (action === "seed") return "seeding this worktree's CodeGraph index from the main repo's index...";
+	return "syncing the CodeGraph index...";
+}
+
+/**
+ * How one index preparation ended, in honest terms. Only a run of this session that came back can be called
+ * synced or created: a joined, coalesced, queued or unavailable request is reported as what it is, and a failed
+ * command is never presented as a current index.
+ */
+export function indexOutcomeNotice(result: AutoIndexResult, cwd: string): IndexNotice {
+	if (result.joined) {
+		return {
+			text: result.action === "init"
+				? "another session is creating the CodeGraph index of this project"
+				: "another session is writing this project's CodeGraph index; this session did not sync it",
+			level: "info",
+		};
+	}
+	if (result.coalesced) return { text: "another session's run completed the CodeGraph index sync requested here", level: "info" };
+	if (result.queued) return { text: "the CodeGraph index sync is queued, not run yet: it waits for the index to be free", level: "info" };
+	if (result.unavailable) return { text: `could not coordinate the CodeGraph index sync in ${cwd}; no sync was started`, level: "warning" };
+	if (!result.ok) return { text: `codegraph ${result.action} failed in ${cwd}; the index is not up to date`, level: "warning" };
+	if (result.action === "init") return { text: "CodeGraph index created", level: "info" };
+	if (result.action === "seed") return { text: "CodeGraph index seeded from the main repo and synced", level: "info" };
+	return { text: "CodeGraph index synced", level: "info" };
+}
+
+/** The daemon warm-up's outcome, kept apart from the index's: a warm daemon says nothing about the index. */
+export function warmOutcomeNotice(outcome: "ok" | "failed", cwd: string): IndexNotice {
+	return outcome === "ok"
+		? { text: "CodeGraph ready", level: "info" }
+		: { text: `CodeGraph warm-up failed in ${cwd}`, level: "warning" };
+}
 
 /** Appends one line of diagnostics to `file`; control characters in the folder become "?" so a record cannot be forged. */
 function appendLog(dir: string, file: string, entry: { cwd: string; outcome: string; ms: number }): void {
