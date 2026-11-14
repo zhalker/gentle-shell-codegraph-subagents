@@ -1,10 +1,6 @@
 ## CodeGraph
 
-One `mcp__codegraph__codegraph_explore` call gates the search and read tools at the start of the task;
-once it has answered, they are free for the rest of it. It returns source plus call paths, so it answers
-both what a symbol is and what calls it. Use it to find the code behind a confirmed finding and every
-caller the patch will reach, so the fix stays surgical. You still read the file before editing it: what it
-returns is where code lives, not what it says. This locates the fix; it does not widen it.
-
-When the workspace has no index it answers nothing: fall back to `read`, `grep` and `find`. A worktree
-has its own index, and no evidence is carried over from another checkout.
+Run one `mcp__codegraph__codegraph_explore` — source plus call paths in one call — before you search or
+read code: `fd`, `find`, `rg`, `grep`, `read` or `cat`. Call it with the symbol behind the finding: the
+code, its callers and what it calls are the whole reach of the patch, so the fix stays inside them. The
+other tools stay available after the first call, and you read the file before editing it.

@@ -1,10 +1,10 @@
 ## CodeGraph
 
-One `mcp__codegraph__codegraph_explore` call gates the search and read tools at the start of the task;
-once it has answered, they are free for the rest of it. It returns source plus call paths, so it answers
-both what a symbol is and what calls it: use it to locate what the change touches, what calls the changed
-symbol and what still uses it, before you run the checks. It reads the index that already exists and
-leaves it alone.
+Run one `mcp__codegraph__codegraph_explore` — source plus call paths in one call — before you search or
+read code: `fd`, `find`, `rg`, `grep`, `read` or `cat`. Call it with the name of a symbol the change
+touches: the callers and dependents it returns are what you choose interaction and regression probes from,
+and you call it again on a caller it surfaces when a probe needs the next layer. The other tools stay
+available after the first call.
 
-Its output is navigation, never evidence. A verdict comes from the source you read and the checks you run;
-an answer a probe contradicts is the tool that is wrong, and passing the graph is not passing the tests.
+The answer is a map, never evidence: a verdict comes from the source you read and the checks you run, and
+a probe that contradicts the graph is the one that is right.

@@ -72,33 +72,46 @@ test("S2: a primary session gets the orchestrator text; a child gets the generic
 	assert.equal(codegraphSection({ tools: [MCP], child: true }), fileText("generic"), "a child whose agent name could not be read");
 });
 
-test("S2: no role's text offers a native `init` operation, and the MCP tool is named in full", () => {
-	// The index is the extension's job at session start, so no text tells an agent to create or refresh one: a
-	// session without one is told to fall back to `read`, `grep` and `find`. `explore.md` mentions `init` and
-	// `sync` only to describe how the CLI takes the project path, which is not an instruction to run either.
+test("S2: no role's text offers or asks for an index write, and the MCP tool is named in full", () => {
+	// The index is the extension's job at session start, so no text tells an agent to create, refresh or locate
+	// one, and none carries a no-index fallback: the agents only know how to use the tool they hold.
 	for (const variant of RULE_VARIANTS) {
 		const text = fileText(variant);
-		assert.doesNotMatch(text, /operation: "init"/, `${variant}.md offers no native init operation`);
-		assert.doesNotMatch(text, /`codegraph init`|`codegraph sync`|create it with/, `${variant}.md tells no one to create an index`);
+		assert.doesNotMatch(text, /\binit\b|`codegraph sync`|create it with/i, `${variant}.md tells no one to create an index`);
+		assert.doesNotMatch(text, /no index|fall back to/, `${variant}.md carries no no-index fallback`);
 		assert.doesNotMatch(text, /`codegraph_explore`/, `${variant}.md names the MCP tool in full`);
 	}
-	for (const variant of ["orchestrator", "generic", "worker", "fix"] as const) {
-		assert.match(fileText(variant), /fall back to `read`, `grep` and `find`/, `${variant}.md says what to do with no index`);
+});
+
+test("S2: every text opens the same gate and leaves the other tools available", () => {
+	for (const variant of RULE_VARIANTS) {
+		const text = fileText(variant).replace(/\s+/g, " ");
+		assert.match(text, /before you search or read code/, `${variant}.md gates searching and reading code`);
+		assert.doesNotMatch(text, /you were not handed/, `${variant}.md leaves the handed feature document out of the gate`);
+		for (const binary of ["fd", "find", "rg", "grep", "read", "cat"]) {
+			assert.match(text, new RegExp(`\`${binary}\``), `${variant}.md names \`${binary}\``);
+		}
 	}
-	for (const variant of ["verify", "judge"] as const) {
-		assert.match(fileText(variant), /leaves it alone/, `${variant}.md leaves the index it reads alone`);
+	for (const variant of RULE_VARIANTS) {
+		assert.match(fileText(variant).replace(/\s+/g, " "), /other tools stay/, `${variant}.md keeps the other tools available`);
 	}
-	// The explorer's own agent file already states the gate, the fallback and the index rules, so its section is the
-	// delta over that file: what `query` and `explore` are for, the evidence rule, and the CLI path argument.
-	const explore = fileText("explore");
-	assert.match(explore, /`query` finds symbols; `explore` returns source plus call paths/);
-	assert.match(explore, /no copied, symlinked or substituted index/);
-	assert.doesNotMatch(explore, /fall back to `read`, `grep` and `find`/, "the base agent file already carries the fallback");
+});
+
+test("S2: only the roles holding the native tool name its operations", () => {
 	// gentle-shell's own allowlist gives the native `codegraph` tool to the orchestrator and the explorer only;
-	// the worker, the fix agent, the verifier and the judges hold `mcp__codegraph__codegraph_explore` alone, so
-	// `query` and `explore` are no operation of theirs.
+	// the worker, the fix agent, the verifier and the judges hold `mcp__codegraph__codegraph_explore` alone, and the
+	// generic text cannot know which tool a child holds.
+	for (const variant of ["orchestrator", "explore"] as const) {
+		assert.match(fileText(variant), /`codegraph` `query`/, `${variant}.md names the native query operation`);
+	}
 	for (const variant of ["worker", "fix", "verify", "judge"] as const) {
-		assert.doesNotMatch(fileText(variant), /`query`|`explore`/, `${variant}.md names no native operation`);
+		const text = fileText(variant);
+		assert.doesNotMatch(text, /`query`|`explore`|`codegraph`/, `${variant}.md names no native operation`);
+		assert.match(text, /`mcp__codegraph__codegraph_explore`/, `${variant}.md names the MCP tool in full`);
+	}
+	assert.doesNotMatch(fileText("generic"), /`query`|`explore`|`mcp__codegraph__codegraph_explore`/, "generic.md names no operation");
+	for (const variant of ["verify", "judge"] as const) {
+		assert.match(fileText(variant), /never (?:evidence|proof)/, `${variant}.md keeps the answer a map, not proof`);
 	}
 });
 
