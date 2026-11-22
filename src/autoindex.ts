@@ -227,7 +227,10 @@ export async function autoIndex(input: AutoIndexInput): Promise<AutoIndexResult>
 			try {
 				if (input.exists(join(input.cwd, ".codegraph"))) return { action, ok: true, joined: true };
 				const commonRoot = (worktreeAction as { action: "seed"; commonRoot: string }).commonRoot;
-				const busy = input.sourceBusy ?? ((root: string) => (typeof input.lock?.isInitLocked === "function" ? input.lock.isInitLocked(root) : false));
+				// The source must be quiet while the copy binds its marker and db: any package lock (init or sync) on
+				// the common root counts. InitLock exposes isHeld; the previous fallback probed isInitLocked, which no
+				// implementation provides, so a real lock never fired and the copy could catch a mid-rebuild db.
+				const busy = input.sourceBusy ?? ((root: string) => typeof input.lock?.isHeld === "function" ? input.lock.isHeld(root) : isInitLocked(root));
 				if (busy(commonRoot)) return { action, ok: true, joined: true };
 				announce();
 				// The source's version marker is captured while the source is quiet, before the copy binds it to the
