@@ -40,10 +40,10 @@ export interface SeedInput {
 
 /**
  * Seeds the worktree's own index by copying the main repo's `codegraph.db`, never while the main index is
- * being written and never leaving a half-built `.codegraph` behind: the directory is created only once the
- * copy has succeeded in memory terms (the copy itself writes the file, the dir exists first only when the
- * copy reported success is possible). The `-wal`/`-shm` siblings are deliberately not copied: the source
- * db must be at rest, and the first `sync` in the worktree rebuilds whatever the WAL held.
+ * being written. The db is copied to a staged `codegraph.db.seeding` name and only moved into place once the
+ * copy succeeded; a failure removes the staged copy and the created directory, so a half-built index never
+ * remains. The `-wal`/`-shm` siblings are deliberately not copied: the source db must be at rest, and the
+ * first `sync` in the worktree rebuilds whatever the WAL held.
  */
 export function seedWorktreeIndex(input: SeedInput): boolean {
 	const source = join(input.commonRoot, ".codegraph", "codegraph.db");

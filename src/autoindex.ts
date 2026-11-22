@@ -60,7 +60,7 @@ const VERSION_TIMEOUT_MS = 10_000;
 
 /**
  * The version of the codegraph engine on Pi's PATH (`codegraph --version`), or undefined when it cannot be told.
- * Asynchronous on purpose: the session start never waits for it. Never rejects.
+ * Async so a caller can overlap it with other startup work; resolves undefined instead of rejecting.
  */
 export function codegraphEngineVersion(): Promise<string | undefined> {
 	return new Promise((resolve) => {
@@ -88,7 +88,7 @@ export function codegraphEngineVersion(): Promise<string | undefined> {
 export const SYNC_TIMEOUT_MS = 120_000;
 export const INIT_TIMEOUT_MS = 600_000;
 
-/** The environment variable a subagent child carries; children never start an index operation of their own. */
+/** The environment variable a subagent child carries; it selects which of this package's index decisions a child skips or makes. */
 export const CHILD_ENV = "GENTLE_PI_AGENTS_CHILD";
 
 export type IndexAction = "sync" | "init" | "seed" | "none";
@@ -254,7 +254,6 @@ export async function autoIndex(input: AutoIndexInput): Promise<AutoIndexResult>
 				// CodeGraph's own lock still names a live init: another party is building this index, not this session.
 				return { action, ok: true, joined: true };
 			}
-			// A failure of this session's own init, with or without a half-built index, is a failure.
 			return { action, ok: initialised };
 		} finally {
 			attempt?.release();

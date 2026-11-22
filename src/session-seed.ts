@@ -28,8 +28,7 @@ function siblingWorktrees(cwd: string): string[] {
  * Seeds the unindexed linked worktrees of this session's repository, so the index exists before the first
  * subagent child is handed the worktree as its `workspace_root`. One `git worktree list` from the session's
  * repo, then the same seeding decision as everywhere else: a worktree that already has an index, or whose
- * main repo has none, is left alone; every copy runs under the existing locks and never leaves a half-built
- * index behind. Runs in the background of the parent's session start; the session never waits for it.
+ * main repo has none, is left alone. Synchronous; callers run it in the background when they want that.
  */
 export function seedSessionWorktrees(input: {
 	cwd: string;
@@ -44,7 +43,7 @@ export function seedSessionWorktrees(input: {
 		for (const root of siblingWorktrees(input.cwd)) {
 			try {
 				const wt = worktreeOf(root);
-				if (!wt.worktree) continue; // the main checkout and non-worktree roots are not our business here
+				if (!wt.worktree) continue;
 				if (input.exists(join(root, ".codegraph"))) { result.skipped.push({ worktree: root, reason: "already has an index" }); continue; }
 				const seeded = seedWorktreeIndex({ worktree: root, commonRoot: wt.commonRoot, sourceBusy: input.sourceBusy, copy: input.copy });
 				if (seeded) result.seeded.push(join(root, ".codegraph", "codegraph.db"));

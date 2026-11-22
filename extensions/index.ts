@@ -220,7 +220,7 @@ export default function (pi: ExtensionAPI) {
 			// The loaded context files are not inspected: a conflicting rule is neither detected nor reported.
 			if (isUserPrompt) firstPromptSeen = true;
 			const prompt = isUserPrompt ? event.prompt : undefined;
-			// Whatever the prefetch answers, its outcome goes to the log; a prompt never waits for it.
+			// The first prompt does wait for this, bounded by the daemon timeout; its outcome is always logged.
 			let outcome: PrefetchOutcome | undefined;
 			const started = Date.now();
 			const content = await prefetchForExplorer({

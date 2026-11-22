@@ -81,7 +81,6 @@ function rewrite(file: string, normalize: (text: string) => string, result: Appl
 		try {
 			const before = readFileSync(file, "utf8");
 			const after = normalize(before);
-			// Already right: nothing to do, or another session just did it.
 			if (after === before) return;
 			saveBackupOnce(file, before);
 			writeAtomic(file, after);

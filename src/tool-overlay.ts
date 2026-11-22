@@ -90,7 +90,6 @@ export interface OverlayResult {
 	errors: string[];
 }
 
-/** The overlay entry for one agent: add the CodeGraph tool, remove nothing. */
 function overlayEntry(): { add: string[]; remove: string[] } {
 	return { add: [TOOL_TO_ADD], remove: [] };
 }
