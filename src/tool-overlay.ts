@@ -1,4 +1,4 @@
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { AGENTS_WITH_MCP_TOOL, CODEGRAPH_MCP_TOOL } from "./agents.ts";
@@ -106,15 +106,19 @@ export function applyToolOverlays(input: { configHome: string }): OverlayResult 
 	const entries: Record<string, { add: string[]; remove: string[] }> = {};
 	for (const agent of OVERLAY_AGENTS) entries[agent] = overlayEntry();
 	const text = JSON.stringify(entries, null, 2) + "\n";
+	const temp = `${file}.${process.pid}.tmp`;
 	try {
 		mkdirSync(dir, { recursive: true });
 		let current: string | undefined;
 		try { current = readFileSync(file, "utf8"); } catch { /* new file */ }
 		if (current !== text) {
-			writeFileSync(file, text);
+			// Atomic replacement: a concurrent agent discovery reads the previous or the new file, never a truncated one.
+			writeFileSync(temp, text);
+			renameSync(temp, file);
 			result.changed.push(file);
 		}
 	} catch (error) {
+		try { unlinkSync(temp); } catch { /* nothing to clean */ }
 		result.errors.push(`${file}: ${error instanceof Error ? error.message : String(error)}`);
 	}
 	return result;

@@ -231,3 +231,37 @@ test("a seed with no run callback stays copy-only and still counts as seeded", a
 	assert.deepEqual(result.seeded, [join(worktrees[0]!, ".codegraph", "codegraph.db")]);
 	assert.deepEqual(result.skipped, []);
 });
+
+test("a worktree that gained an index while the seed waited for its lock is skipped, its index untouched", async (t) => {
+	const { repo, worktrees, base } = repoWithWorktrees(1);
+	t.after(() => rmSync(base, { recursive: true, force: true }));
+	mkdirSync(join(repo, ".codegraph"));
+	writeFileSync(join(repo, ".codegraph", "codegraph.db"), "seed");
+	// Another session completes its init and releases the lock between the outer check and this seed's
+	// acquire: its index appears exactly when this seed acquires, so only the in-lock recheck can still see it.
+	const copies: string[] = [];
+	const runs: string[] = [];
+	const result = await seedSessionWorktrees({
+		cwd: repo,
+		exists: (path) => {
+			if (!path.startsWith(worktrees[0]!)) return existsSync(path);
+			return existsSync(path); // real fs query: the stub acquire creates the index before the recheck
+		},
+		sourceBusy: () => false,
+		copy: (from, to) => { copies.push(to); writeFileSync(to, "stale-seed"); return true; },
+		lock: {
+			acquire: (project) => {
+				const dir = join(String(project), ".codegraph");
+				mkdirSync(dir, { recursive: true }); // the other session's completed init, seen at acquire time
+				writeFileSync(join(dir, "codegraph.db"), "other-session");
+				return { status: "acquired", adopt: () => {}, release: () => {} };
+			},
+			isHeld: () => false,
+		},
+		run: async () => { runs.push("sync"); return true; },
+	});
+	assert.deepEqual(result.seeded, [], "a worktree whose index appeared before the copy is not seeded");
+	assert.deepEqual(copies, [], "the finished index is not overwritten by the seed copy");
+	assert.deepEqual(runs, [], "no sync runs against the finished index");
+	assert.deepEqual(result.skipped, [{ worktree: worktrees[0]!.replaceAll("\\", "/"), reason: "already has an index" }]);
+});

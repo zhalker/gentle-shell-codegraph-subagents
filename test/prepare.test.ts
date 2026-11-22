@@ -298,3 +298,20 @@ test("P5: after a successful reindex the marker is written with the new version"
 	// Covered by the first P5 test's exact-sequence log (marker:1.6.4 after indexed:reindex:true).
 	assert.ok(true);
 });
+
+test("P5/JD-fix: a seed records the SOURCE index's recorded version, never the running engine", async () => {
+	const { recordedSeedVersion } = await import("../src/autoindex.ts");
+	// Stale source: the copy keeps the source's version so the worktree still rebuilds.
+	assert.equal(recordedSeedVersion("1.6.0", "1.6.4", "seed"), "1.6.0");
+	// Unmarked source: unknown stays unknown, never adopted as current.
+	assert.equal(recordedSeedVersion(undefined, "1.6.4", "seed"), undefined);
+	// Same version either way is recorded.
+	assert.equal(recordedSeedVersion("1.6.4", "1.6.4", "seed"), "1.6.4");
+	// Non-seed builds record the running engine, as before.
+	assert.equal(recordedSeedVersion("1.6.0", "1.6.4", "reindex"), "1.6.4");
+	assert.equal(recordedSeedVersion("1.6.0", "1.6.4", "init"), "1.6.4");
+	// No engine version (unit-style tests): never records.
+	assert.equal(recordedSeedVersion("1.6.0", undefined, "seed"), undefined);
+	// A sync records nothing.
+	assert.equal(recordedSeedVersion("1.6.0", "1.6.4", "sync"), undefined);
+});

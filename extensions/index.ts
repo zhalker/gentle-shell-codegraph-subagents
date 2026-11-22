@@ -7,7 +7,7 @@ import { applyCodegraphSubagents, readExposureWarning, readMissingServerWarning 
 import { CHILD_ENV, codegraphEngineVersion, prepareProject, readIndexVersionMarker, runCodegraph, writeIndexVersionMarker, type SessionStartReason } from "../src/autoindex.ts";
 import { compactionSync, realSyncLock } from "../src/compaction-sync.ts";
 import { exploreViaDaemon } from "../src/daemonclient.ts";
-import { realInitLock, isInitRunning } from "../src/initlock.ts";
+import { realInitLock, isInitLocked, isInitRunning } from "../src/initlock.ts";
 import { chooseIndexNotice, firstPromptMessage, INDEX_NOTICE_TYPE, logPrefetch, logSync, noticeTools, type PrefetchOutcome } from "../src/index-notice.ts";
 import { explorePerCase, prefetchForExplorer } from "../src/prefetch.ts";
 import { messageText, promptContext, promptMessageLine } from "../src/prompt-context.ts";
@@ -149,7 +149,7 @@ export default function (pi: ExtensionAPI) {
 		// worktree is a file copy plus one sync in that tree, so it answers with its own files, not the main
 		// checkout's.
 		if (event.reason !== "reload") {
-			void Promise.resolve().then(() => seedSessionWorktrees({ cwd: ctx.cwd, exists: existsSync, sourceBusy: () => isInitRunning(ctx.cwd), copy: (from, to) => {
+			void Promise.resolve().then(() => seedSessionWorktrees({ cwd: ctx.cwd, exists: existsSync, sourceBusy: () => isInitLocked(ctx.cwd), copy: (from, to) => {
 				try { copyFileSync(from, to); return true; } catch { return false; }
 			}, run: runCodegraph, lock: realInitLock })).catch(() => {});
 		}
@@ -164,7 +164,7 @@ export default function (pi: ExtensionAPI) {
 				try {
 					const e = payload as { sessionId?: unknown } | undefined;
 					if (!e || e.sessionId !== ctx.sessionManager.getSessionId()) return;
-					void Promise.resolve().then(() => seedSessionWorktrees({ cwd: ctx.cwd, exists: existsSync, sourceBusy: () => isInitRunning(ctx.cwd), copy: (from, to) => {
+					void Promise.resolve().then(() => seedSessionWorktrees({ cwd: ctx.cwd, exists: existsSync, sourceBusy: () => isInitLocked(ctx.cwd), copy: (from, to) => {
 						try { copyFileSync(from, to); return true; } catch { return false; }
 					}, run: runCodegraph, lock: realInitLock })).catch(() => {});
 				} catch { /* a failed event-driven seed just falls back to the next scan */ }

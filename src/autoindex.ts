@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { copyFileSync, existsSync, readFileSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { codegraphWritingIndex, isInitLocked, type InitLock } from "./initlock.ts";
@@ -33,14 +33,33 @@ export function readIndexVersionMarker(cwd: string, exists: (path: string) => bo
 	}
 }
 
-/** Records that this project's index was (re)built by `version`. Never throws. */
+/** Records that this project's index was (re)built by `version`, atomically: a reader sees the previous marker or the new one, never a truncated file. Never throws. */
 export function writeIndexVersionMarker(cwd: string, version: string, _exists?: (path: string) => boolean): void {
+	const file = markerPath(cwd);
+	const staged = `${file}.${process.pid}.tmp`;
 	try {
-		writeFileSync(markerPath(cwd), JSON.stringify({ version }) + "\n");
-	} catch { /* an unwritable index directory loses nothing but the next reindex check */ }
+		writeFileSync(staged, JSON.stringify({ version }) + "\n");
+		renameSync(staged, file);
+	} catch {
+		try { unlinkSync(staged); } catch { /* nothing to clean */ }
+		/* an unwritable index directory loses nothing but the next reindex check */
+	}
 }
 
 export type IndexVersionState = "current" | "reindex" | "unknown" | "none";
+
+/**
+ * Which engine version a freshly built or seeded index records. A rebuild and an init built this index with the
+ * running engine; a seed copies the source checkout's index, so it keeps that source's recorded version — the
+ * running version there would hide a still-needed rebuild in the copied index, and an unmarked source stays
+ * unmarked rather than adopted as current.
+ */
+export function recordedSeedVersion(sourceVersion: string | undefined, engineVersion: string | undefined, action: IndexResultAction): string | undefined {
+	if (engineVersion === undefined) return undefined;
+	if (action === "reindex" || action === "init") return engineVersion;
+	if (action === "seed") return sourceVersion;
+	return undefined;
+}
 
 /**
  * Whether this project's index was built by the running engine version. `unknown` is an existing index
@@ -183,6 +202,8 @@ export interface AutoIndexResult {
 	joined?: boolean;
 	/** Another session was already syncing, so this one left the sync to it; its run completed. */
 	coalesced?: boolean;
+	/** For a seed: the engine version recorded in the source checkout's marker, when the seeded index kept it. */
+	sourceVersion?: string;
 	/** The request is recorded on disk and still waiting for the index to be free; nothing ran yet. */
 	queued?: boolean;
 	/** The coordination state could not be used, so no sync was started here. */
@@ -218,7 +239,12 @@ export async function autoIndex(input: AutoIndexInput): Promise<AutoIndexResult>
 				if (!seeded) return { action, ok: false };
 				// The seeded db reflects the main tree; the worktree's first sync reconciles it to this tree.
 				const ok = await input.run(["sync", "-q"], input.cwd, SYNC_TIMEOUT_MS, (pid, options) => adopt(pid, options));
-				return { action, ok };
+				// The copied index keeps the engine version that built it in the main checkout: recording the running
+				// version here would hide a still-needed rebuild in the worktree. No source marker stays unknown.
+				const sourceVersion = ok ? readIndexVersionMarker(commonRoot, input.exists) : undefined;
+				return ok
+					? { action, ok, ...(sourceVersion !== undefined ? { sourceVersion } : {}) }
+					: { action, ok };
 			} finally {
 				attempt?.release();
 			}
@@ -387,12 +413,14 @@ export async function prepareProject(input: PrepareInput): Promise<PrepareResult
 	if (index.action !== "none") {
 		try { input.onIndexed?.(index); } catch { /* telling the user is never worth stopping the warm-up */ }
 	}
-	// Only an index this session built itself is known to match the running engine; a sync changes nothing there.
+	// Only an index this session built itself records a version: the helper returns the running engine for a
+	// rebuild/init, the source checkout's recorded version for a seed (so a stale source still triggers the
+	// worktree rebuild and an unmarked source stays unknown), and undefined for a sync.
 	const built = index.action === "reindex" || index.action === "init" || index.action === "seed";
-	if (input.engineVersion !== undefined && built && index.ok && !index.joined) {
-		const version = input.engineVersion;
+	const recorded = recordedSeedVersion(index.sourceVersion, input.engineVersion, index.action);
+	if (recorded !== undefined && built && index.ok && !index.joined) {
 		try {
-			(input.writeIndexVersion ?? ((recorded: string) => writeIndexVersionMarker(input.cwd, recorded)))(version);
+			(input.writeIndexVersion ?? ((version: string) => writeIndexVersionMarker(input.cwd, version)))(recorded);
 		} catch { /* a lost marker costs one more rebuild later, never the warm-up */ }
 	}
 	// A sync or a reindex that failed still leaves an index to warm; a failed init or seed leaves nothing worth warming.

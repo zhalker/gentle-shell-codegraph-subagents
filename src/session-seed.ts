@@ -71,6 +71,9 @@ export async function seedSessionWorktrees(input: SessionSeedInput): Promise<Ses
 				if (attempt?.status === "busy") { result.skipped.push({ worktree: root, reason: "another session is writing this worktree's index" }); continue; }
 				const adopt = attempt?.status === "acquired" ? attempt.adopt : () => {};
 				try {
+					// Another session may have completed an init between the outer check and this lock: overwriting its
+					// index and then deleting it on a failed sync would destroy a finished index.
+					if (input.exists(join(root, ".codegraph"))) { result.skipped.push({ worktree: root, reason: "already has an index" }); continue; }
 					const copied = seedWorktreeIndex({ worktree: root, commonRoot: wt.commonRoot, sourceBusy: input.sourceBusy, copy: input.copy });
 					if (!copied) { result.skipped.push({ worktree: root, reason: "the seed copy failed" }); continue; }
 					// The copy alone still carries the main checkout's data, so the worktree counts as seeded only after
