@@ -13,6 +13,7 @@ import { explorePerCase, prefetchForExplorer } from "../src/prefetch.ts";
 import { messageText, promptContext, promptMessageLine } from "../src/prompt-context.ts";
 import { seedSessionWorktrees } from "../src/session-seed.ts";
 import { seedWorktreeIndex } from "../src/seed.ts";
+import { applyToolOverlays, findGentlePiVersion, resolveConfigHome, shouldUseOverlay } from "../src/tool-overlay.ts";
 import { worktreeOf } from "../src/worktree.ts";
 import { warmUpDaemon } from "../src/warmup.ts";
 import { repairFrozenAgentFiles, repairNotices, settleAgentFileRepairs, type RepairOutcome } from "../src/repair.ts";
@@ -68,6 +69,28 @@ function startAutoIndex(reason: SessionStartReason, ctx: ExtensionContext): void
 
 // Reapplied on every session start so a reinstall (pi install, gentle-shell install)
 // or a gentle-ai sync that rewrote the agent files is corrected on the next launch.
+// Applies the CodeGraph wiring to gentle-pi: on gentle-pi >= 4.9.0 via the subagent tool overlay
+// (a drop-in JSON under gentle-pi's config home), on older versions by rewriting the agent files.
+// Both paths keep the mcp.json normalization; a failure never throws into session start.
+export function applyCodegraphWiring(ctx: ExtensionContext): { changed: string[]; errors: string[] } {
+	const agentDir = getAgentDir();
+	const overlay = shouldUseOverlay(findGentlePiVersion(agentDir));
+	let wiring: { changed: string[]; errors: string[] };
+	if (overlay) {
+		// Gentle-pi resolves its own config home from the bundled prefix first; our approximation passes
+		// GENTLE_SHELL_PREFIX through and relies on the existing <prefix>/config/gentle-ai existence check.
+		const configHome = resolveConfigHome({ home: homedir(), env: process.env, prefix: process.env.GENTLE_SHELL_PREFIX });
+		const result = applyToolOverlays({ configHome });
+		// In overlay mode the agent files stay untouched, so gentle-pi's installer keeps owning them.
+		const apply = applyCodegraphSubagents(agentDir, { agentFiles: false });
+		wiring = { changed: result.changed, errors: [...result.errors, ...apply.errors] };
+	} else {
+		const apply = applyCodegraphSubagents(agentDir);
+		wiring = { changed: apply.changed, errors: apply.errors };
+	}
+	return wiring;
+}
+
 export default function (pi: ExtensionAPI) {
 	let firstPromptSeen = false;
 	// Runs at load, before gentle-pi's own startup install: a frozen agent file is moved aside here, so that
@@ -132,11 +155,11 @@ export default function (pi: ExtensionAPI) {
 			if (typeof unsubscribeWorktreeEvent === "function") pi.on("session_shutdown", () => unsubscribeWorktreeEvent());
 		} catch { /* without the bus the scan at session start still covers every worktree it sees */ }
 		try {
-			const { changed, errors } = applyCodegraphSubagents(getAgentDir());
+			const { changed, errors } = applyCodegraphWiring(ctx);
 			if (!ctx.hasUI) return;
-			if (changed.length > 0) ctx.ui.notify(`gentle-shell-codegraph-subagents: updated ${changed.length} file(s)`, "info");
+			if (changed.length > 0) ctx.ui.notify(`gentle-shell-codegraph-subagents: updated ${changed.length} item(s)`, "info");
 			notifyRepair(ctx, loadRepair);
-			if (errors.length > 0) ctx.ui.notify(`gentle-shell-codegraph-subagents: ${errors.length} file(s) skipped: ${errors[0]}`, "warning");
+			if (errors.length > 0) ctx.ui.notify(`gentle-shell-codegraph-subagents: ${errors.length} item(s) skipped: ${errors[0]}`, "warning");
 			const registered = pi.getMcpServers?.().some((server) => server.name === "codegraph") ?? false;
 			if (process.env.GENTLE_PI_AGENTS_CHILD !== "1" && readMissingServerWarning(getAgentDir(), ctx.cwd, ctx.isProjectTrusted(), registered)) {
 				ctx.ui.notify("gentle-shell-codegraph-subagents: CodeGraph MCP server was not found in the current configuration. Subagents may not have direct access; configure the server to enable it.", "warning");

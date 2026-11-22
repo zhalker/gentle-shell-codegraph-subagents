@@ -1,6 +1,6 @@
 # @zhalker/gentle-shell-codegraph-subagents
 
-Pi package that keeps CodeGraph reachable, and actually used, by gentle-shell subagents. Install it once: on every session start it fixes the agents' tool lists and the CodeGraph MCP exposure, keeps the project index synced and its daemon warm, and hands the explorer subagent CodeGraph's answer before it even starts.
+A Pi package that keeps CodeGraph reachable, and actually used, by gentle-shell subagents. Install it once: on every session start it places the CodeGraph MCP tool into the subagent allowlist (gentle-pi tool overlay on 4.9.0+, agent-file normalization before that), fixes the CodeGraph MCP exposure, keeps the project index synced and its daemon warm, and hands the explorer subagent CodeGraph's answer before it even starts.
 
 Upstream issue: Gentleman-Programming/gentle-shell#2804. License: MIT.
 
@@ -52,11 +52,13 @@ Changes apply on the next session start. Reinstalling, or running `gentle-ai syn
 
 ## Uninstall
 
-Remove the package, then copy each `*.pre-codegraph-subagents.bak` over its original if you want the previous files back. A frozen file a repair had just swapped out waits as `*.codegraph-repair-pending`: rename it back under its own name.
+Remove the package, then delete `<configHome>/agent-overlays.d/zhalker-codegraph-subagents.json` (the tool overlay; `~/.pi/gentle-ai/agent-overlays.d/` by default). To restore agent files that an older version normalized, copy each `*.pre-codegraph-subagents.bak` over its original. A frozen file a repair had just swapped out waits as `*.codegraph-repair-pending`: rename it back under its own name.
 
 ## How it works
 
-In `~/.pi/agent/agents/` and `~/.pi/agent/subagents/` (or `$PI_CODING_AGENT_DIR`):
+On gentle-pi 4.9.0 or newer, the tool list changes are made through gentle-pi's subagent tool overlay (gentle-shell#3133): the package writes one drop-in file, `<configHome>/agent-overlays.d/zhalker-codegraph-subagents.json`, which adds `mcp__codegraph__codegraph_explore` to `gentle-ai-explore`, `gentle-ai-verify`, `gentle-ai-worker`, `jd-fix-agent`, `jd-judge-a` and `jd-judge-b`, and removes nothing. gentle-pi resolves its config home as the bundled prefix's folder, then `GENTLE_PI_CONFIG_HOME`, then an absolute `GENTLE_SHELL_CONFIG_HOME`, then `~/.pi/gentle-ai`; the package follows the same precedence. The drop-in is rewritten when its content differs and never overwrites other packages' drop-ins. Because no agent `.md` file is touched, gentle-pi keeps managing its agents and refreshes them on upgrades; the `mcp.json` normalization below still applies. On older gentle-pi versions the package falls back to the agent-file normalization described below.
+
+In `~/.pi/agent/agents/` and `~/.pi/agent/subagents/` (or `$PI_CODING_AGENT_DIR`), on versions without the overlay:
 
 - Leaves a file with no gentle-ai marker blocks byte for byte untouched. Any local edit makes gentle-pi drop an agent file from `~/.pi/agent/gentle-ai/managed-assets.json` at the next session start and stop refreshing it on upgrades, so an agent that gentle-ai never touched keeps being updated.
 - In a file that carries gentle-ai's blocks (that file is already frozen), removes the blocks between `<!-- gentle-ai:pi-codegraph-tool -->` / `<!-- gentle-ai:pi-codegraph-guidance -->` and `<!-- /gentle-ai:pi-codegraph -->`.

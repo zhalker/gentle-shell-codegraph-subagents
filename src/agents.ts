@@ -1,6 +1,6 @@
 export const CODEGRAPH_MCP_TOOL = "mcp__codegraph__codegraph_explore";
 
-const AGENTS_WITH_MCP_TOOL = new Set([
+export const AGENTS_WITH_MCP_TOOL = new Set([
 	"gentle-ai-explore",
 	"gentle-ai-verify",
 	"gentle-ai-worker",

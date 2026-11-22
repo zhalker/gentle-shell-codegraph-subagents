@@ -97,21 +97,29 @@ function rewrite(file: string, normalize: (text: string) => string, result: Appl
 	result.errors.push(`${file}: ${failure instanceof Error ? failure.message : String(failure)}`);
 }
 
+/** Options for applyCodegraphSubagents. */
+export interface ApplyOptions {
+	/** false skips the agent .md files (the overlay path owns the tool list then); mcp.json is still normalized. */
+	agentFiles?: boolean;
+}
+
 /**
  * Applies the CodeGraph wiring to the global agent definitions and to mcp.json
  * under `agentDir`. Idempotent and never throws: failures are returned in `errors`.
  */
-export function applyCodegraphSubagents(agentDir: string): ApplyResult {
+export function applyCodegraphSubagents(agentDir: string, options: ApplyOptions = {}): ApplyResult {
 	const result: ApplyResult = { changed: [], errors: [] };
-	for (const folder of ["agents", "subagents"]) {
-		const dir = join(agentDir, folder);
-		let entries: string[];
-		try {
-			entries = readdirSync(dir).filter((entry) => entry.toLowerCase().endsWith(".md")).sort();
-		} catch {
-			continue;
+	if (options.agentFiles !== false) {
+		for (const folder of ["agents", "subagents"]) {
+			const dir = join(agentDir, folder);
+			let entries: string[];
+			try {
+				entries = readdirSync(dir).filter((entry) => entry.toLowerCase().endsWith(".md")).sort();
+			} catch {
+				continue;
+			}
+			for (const entry of entries) rewrite(join(dir, entry), normalizeAgent, result);
 		}
-		for (const entry of entries) rewrite(join(dir, entry), normalizeAgent, result);
 	}
 	const mcp = join(agentDir, "mcp.json");
 	if (existsSync(mcp)) rewrite(mcp, normalizeMcpConfig, result);

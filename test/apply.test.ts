@@ -182,3 +182,15 @@ test("S16: sessions that start at the same instant rewrite the same files withou
 		}
 	}
 });
+
+test("S2: agentFiles:false skips the agent .md files but still normalizes mcp.json (overlay mode)", () => {
+	const dir = setup();
+	const result = applyCodegraphSubagents(dir, { agentFiles: false });
+	assert.deepEqual(result.errors, []);
+	assert.deepEqual(result.changed, [join(dir, "mcp.json")]);
+	// The agent files are byte-for-byte untouched.
+	assert.equal(readFileSync(join(dir, "agents", "gentle-ai-verify.md"), "utf8"), VERIFY);
+	assert.equal(readFileSync(join(dir, "subagents", "review-risk.md"), "utf8"), REVIEW);
+	assert.equal(readFileSync(join(dir, "agents", "gentle-ai-worker.md"), "utf8"), PLAIN);
+	assert.equal(JSON.parse(readFileSync(join(dir, "mcp.json"), "utf8")).mcpServers.codegraph.toolExposure.codegraph_explore, "direct");
+});
