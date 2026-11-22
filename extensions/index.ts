@@ -145,11 +145,13 @@ export default function (pi: ExtensionAPI) {
 	pi.on("session_start", async (event, ctx) => {
 		startAutoIndex(event.reason, ctx);
 		// Seed the session repo's unindexed worktrees in the background, so the index exists before the first
-		// subagent child is handed one. Never waits, never announces: a skipped worktree costs nothing.
+		// subagent child is handed one. Never waits, never announces: a skipped worktree costs nothing. Each
+		// worktree is a file copy plus one sync in that tree, so it answers with its own files, not the main
+		// checkout's.
 		if (event.reason !== "reload") {
 			void Promise.resolve().then(() => seedSessionWorktrees({ cwd: ctx.cwd, exists: existsSync, sourceBusy: () => isInitRunning(ctx.cwd), copy: (from, to) => {
 				try { copyFileSync(from, to); return true; } catch { return false; }
-			} })).catch(() => {});
+			}, run: runCodegraph, lock: realInitLock })).catch(() => {});
 		}
 		// The precise hook, when it exists: gentle-pi emits its session worktree registry event on Pi's shared
 		// extension event bus every time a worktree joins the session's working set (explicit register today).
@@ -164,7 +166,7 @@ export default function (pi: ExtensionAPI) {
 					if (!e || e.sessionId !== ctx.sessionManager.getSessionId()) return;
 					void Promise.resolve().then(() => seedSessionWorktrees({ cwd: ctx.cwd, exists: existsSync, sourceBusy: () => isInitRunning(ctx.cwd), copy: (from, to) => {
 						try { copyFileSync(from, to); return true; } catch { return false; }
-					} })).catch(() => {});
+					}, run: runCodegraph, lock: realInitLock })).catch(() => {});
 				} catch { /* a failed event-driven seed just falls back to the next scan */ }
 			});
 			if (typeof unsubscribeWorktreeEvent === "function") pi.on("session_shutdown", () => unsubscribeWorktreeEvent());
