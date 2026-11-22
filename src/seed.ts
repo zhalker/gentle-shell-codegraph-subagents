@@ -33,7 +33,7 @@ export interface SeedInput {
 	/** The common root whose `.codegraph` holds the source db. */
 	commonRoot: string;
 	/** Whether the main index is being written right now (an init or sync holds it). */
-	sourceBusy(): boolean;
+	sourceBusy(commonRoot: string): boolean;
 	/** Copies the db; false (or a throw) means the seed failed and nothing is left behind. */
 	copy(from: string, to: string): boolean;
 }
@@ -47,7 +47,7 @@ export interface SeedInput {
  */
 export function seedWorktreeIndex(input: SeedInput): boolean {
 	const source = join(input.commonRoot, ".codegraph", "codegraph.db");
-	if (!existsSync(source) || input.sourceBusy()) return false;
+	if (!existsSync(source) || input.sourceBusy(input.commonRoot)) return false;
 	const targetDir = join(input.worktree, ".codegraph");
 	const target = join(targetDir, "codegraph.db");
 	try {

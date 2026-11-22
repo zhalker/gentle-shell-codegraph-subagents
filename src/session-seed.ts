@@ -16,7 +16,7 @@ export interface SessionSeedResult {
 export interface SessionSeedInput {
 	cwd: string;
 	exists(path: string): boolean;
-	sourceBusy(): boolean;
+	sourceBusy?(commonRoot: string): boolean;
 	copy(from: string, to: string): boolean;
 	/**
 	 * Runs `codegraph <args>` in `cwd`; true when it exited 0. This is the sync that follows the copy, so a seeded
@@ -58,7 +58,7 @@ function siblingWorktrees(cwd: string): string[] {
 export async function seedSessionWorktrees(input: SessionSeedInput): Promise<SessionSeedResult> {
 	try {
 		const mainIndex = join(input.cwd, ".codegraph", "codegraph.db");
-		if (!input.exists(mainIndex) || input.sourceBusy()) return { seeded: [], skipped: [{ worktree: input.cwd, reason: "the session's own index is missing or being written" }] };
+		if (!input.exists(mainIndex) || input.sourceBusy?.(input.cwd) === true) return { seeded: [], skipped: [{ worktree: input.cwd, reason: "the session's own index is missing or being written" }] };
 		const result: SessionSeedResult = { seeded: [], skipped: [] };
 		for (const root of siblingWorktrees(input.cwd)) {
 			try {
@@ -74,7 +74,17 @@ export async function seedSessionWorktrees(input: SessionSeedInput): Promise<Ses
 					// Another session may have completed an init between the outer check and this lock: overwriting its
 					// index and then deleting it on a failed sync would destroy a finished index.
 					if (input.exists(join(root, ".codegraph"))) { result.skipped.push({ worktree: root, reason: "already has an index" }); continue; }
-					const copied = seedWorktreeIndex({ worktree: root, commonRoot: wt.commonRoot, sourceBusy: input.sourceBusy, copy: input.copy });
+					// The copy reads the source checkout's db: hold the source's own index lock across the copy, so a
+					// concurrent init or sync of the main checkout cannot start while its database is being read. The
+					// follow-up sync runs after this release: it writes the worktree, not the source.
+					const source = input.lock?.acquire(wt.commonRoot, { kind: "sync" });
+					if (source?.status === "busy") { result.skipped.push({ worktree: root, reason: "the main checkout's index is being written" }); continue; }
+					let copied = false;
+					try {
+						copied = seedWorktreeIndex({ worktree: root, commonRoot: wt.commonRoot, sourceBusy: input.sourceBusy ?? (() => false), copy: input.copy });
+					} finally {
+						source?.release();
+					}
 					if (!copied) { result.skipped.push({ worktree: root, reason: "the seed copy failed" }); continue; }
 					// The copy alone still carries the main checkout's data, so the worktree counts as seeded only after
 					// the sync that reconciles it to this tree. Without a run callback nothing syncs (copy-only).

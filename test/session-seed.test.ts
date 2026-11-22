@@ -193,7 +193,7 @@ test("a seeded worktree holds the package's index lock, adopts the spawned pid a
 	});
 	const wt = worktrees[0]!.replaceAll("\\", "/");
 	assert.deepEqual(result.seeded, [join(worktrees[0]!, ".codegraph", "codegraph.db")]);
-	assert.deepEqual(log, [`acquire:${wt}`, "copy", `run:sync -q:${wt}:${SYNC_TIMEOUT_MS}`, "adopt:4242:proxy", `release:${wt}`], "the lock covers the copy and the sync, and the spawned pid is adopted inside it");
+	assert.deepEqual(log, [`acquire:${wt}`, `acquire:${repo}`, "copy", `release:${repo}`, `run:sync -q:${wt}:${SYNC_TIMEOUT_MS}`, "adopt:4242:proxy", `release:${wt}`], "the lock covers the copy and the sync, and the spawned pid is adopted inside it");
 });
 
 test("a failed copy releases the lock and starts no sync", async (t) => {
@@ -213,7 +213,7 @@ test("a failed copy releases the lock and starts no sync", async (t) => {
 	const wt = worktrees[0]!.replaceAll("\\", "/");
 	assert.deepEqual(result.seeded, []);
 	assert.deepEqual(result.skipped, [{ worktree: wt, reason: "the seed copy failed" }]);
-	assert.deepEqual(log, [`acquire:${wt}`, `release:${wt}`]);
+	assert.deepEqual(log, [`acquire:${wt}`, `acquire:${repo}`, `release:${repo}`, `release:${wt}`]);
 	assert.equal(existsSync(join(worktrees[0]!, ".codegraph")), false);
 });
 
