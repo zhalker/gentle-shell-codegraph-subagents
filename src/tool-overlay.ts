@@ -41,14 +41,18 @@ export interface ConfigHomeInput {
 export function resolveConfigHome(input: ConfigHomeInput): string {
 	const bundled = input.prefix === undefined ? undefined : join(input.prefix, "config", "gentle-ai");
 	if (bundled !== undefined && existsSync(bundled)) return bundled;
-	const fromEnv = (value: string | undefined): string | undefined => {
-		if (value === undefined || value.trim().length === 0) return undefined;
-		const looksAbsolute = /^[a-zA-Z]:[\\/]/.test(value) || value.startsWith("\\\\") || value.startsWith("/");
-		return looksAbsolute ? value : undefined;
-	};
-	return fromEnv(input.env.GENTLE_PI_CONFIG_HOME)
-		?? fromEnv(input.env.GENTLE_SHELL_CONFIG_HOME)
-		?? join(input.home, ".pi", "gentle-ai");
+	// gentle-pi honors GENTLE_PI_CONFIG_HOME verbatim (relative included; only empty counts as unset) and
+	// gates just the launcher marker to absolute values. Matching that exactly matters: a config home
+	// gentle-pi does not read would leave the tool silently outside every subagent allowlist.
+	if (input.env.GENTLE_PI_CONFIG_HOME !== undefined && input.env.GENTLE_PI_CONFIG_HOME.trim().length > 0) {
+		return input.env.GENTLE_PI_CONFIG_HOME;
+	}
+	const marker = input.env.GENTLE_SHELL_CONFIG_HOME;
+	if (marker !== undefined && marker.trim().length > 0) {
+		const looksAbsolute = /^[a-zA-Z]:[\\/]/.test(marker) || marker.startsWith("\\\\") || marker.startsWith("/");
+		if (looksAbsolute) return marker;
+	}
+	return join(input.home, ".pi", "gentle-ai");
 }
 
 /**

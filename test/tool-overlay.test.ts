@@ -29,9 +29,16 @@ test("S2: resolveConfigHome follows gentle-pi precedence: bundled prefix, GENTLE
 	// Bundled prefix wins, including over GENTLE_PI_CONFIG_HOME (resolveGentlePiConfigHome checks bundled first).
 	assert.equal(resolveConfigHome({ home, env: {}, prefix }), bundled);
 	assert.equal(resolveConfigHome({ home, env: { GENTLE_PI_CONFIG_HOME: join(home, "cfg-pi") }, prefix }), bundled);
+	// GENTLE_PI_CONFIG_HOME is honored verbatim, relative included, exactly like gentle-pi's own
+	// resolution (gentle-shell-bundled.ts: "if (env.GENTLE_PI_CONFIG_HOME) return ..."); only the
+	// launcher marker (GENTLE_SHELL_CONFIG_HOME) is gated to absolute values. Writing the drop-in
+	// where gentle-pi does not read it would leave the tool silently outside every allowlist.
+	assert.equal(resolveConfigHome({ home, env: { GENTLE_PI_CONFIG_HOME: "rel/cfg" } }), "rel/cfg");
 	// GENTLE_SHELL_CONFIG_HOME beats home — but not the bundled prefix; absolute only.
 	const explicitShell = join(home, "cfg-shell");
 	assert.equal(resolveConfigHome({ home, env: { GENTLE_SHELL_CONFIG_HOME: explicitShell }, prefix }), bundled);
+	// GENTLE_PI_CONFIG_HOME beats GENTLE_SHELL_CONFIG_HOME (gentle-pi checks them in that order).
+	assert.equal(resolveConfigHome({ home, env: { GENTLE_PI_CONFIG_HOME: join(home, "cfg-pi"), GENTLE_SHELL_CONFIG_HOME: explicitShell } }), join(home, "cfg-pi"));
 	assert.equal(resolveConfigHome({ home, env: { GENTLE_SHELL_CONFIG_HOME: explicitShell } }), explicitShell);
 	assert.equal(resolveConfigHome({ home, env: { GENTLE_SHELL_CONFIG_HOME: "relative/path" } }), join(home, ".pi", "gentle-ai"));
 	// Without prefix or env, the home default.
@@ -54,17 +61,22 @@ test("S2: applyToolOverlays is idempotent: rewriting an identical file changes n
 	assert.deepEqual(result.changed, []);
 });
 
-test("S2: applyToolOverlays preserves unrelated drop-ins and replaces only our own file", () => {
+test("S2: applyToolOverlays preserves unrelated drop-ins byte for byte and replaces stale copies of our own file", () => {
 	const configHome = scratch();
 	const dir = join(configHome, OVERLAY_DROPPIN_DIR);
 	mkdirSync(dir, { recursive: true });
 	const other = join(dir, "other-package.json");
 	writeFileSync(other, `{"some-agent": {"add": ["read"]}}`);
 	const stashed = readFileSync(other, "utf8");
+	// A stale old copy of ours (from an earlier package version) is overwritten with the current content.
+	const stale = join(dir, CODEGRAPH_DROPPIN);
+	writeFileSync(stale, `{"some-agent": {"add": ["stale"]}}`);
 	applyToolOverlays({ configHome });
 	assert.equal(existsSync(other), true);
-	// A stale old copy of ours is overwritten with the current content.
-	assert.deepEqual(Object.keys(readJson(join(dir, CODEGRAPH_DROPPIN)) as object).sort(), [...SIX].sort());
+	assert.equal(readFileSync(other, "utf8"), stashed);
+	const ours = readJson(stale) as Record<string, { add: string[]; remove: string[] }>;
+	assert.deepEqual(Object.keys(ours).sort(), [...SIX].sort());
+	for (const agent of SIX) assert.deepEqual(ours[agent], { add: [TOOL_TO_ADD], remove: [] });
 });
 
 test("S2: applyToolOverlays tolerates a config home that does not exist yet", () => {

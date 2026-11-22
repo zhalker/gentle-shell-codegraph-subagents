@@ -10,11 +10,11 @@ Migrate @zhalker/gentle-shell-codegraph-subagents to the gentle-pi 4.9.0 subagen
 
 ## Tasks
 
-- T1 | S2 | src/tool-overlay.ts: modelo de overlay + escritura idempotente del drop-in en `<configHome>/agent-overlays.d/`, resolviendo configHome con la precedencia de gentle-pi (bundled prefix > GENTLE_PI_CONFIG_HOME > GENTLE_SHELL_CONFIG_HOME > ~/.pi/gentle-ai) | inline | commit W1
-- T2 | S2 | Detección de soporte overlay (gentle-pi >= 4.9.0) y routing: overlay si está disponible, normalizeAgent legacy si no | inline | commit W2
-- T3 | S2 | extensions/index.ts: escribir el drop-in en session_start (layout); saltar el rewrite legacy cuando el overlay está activo; mantener warnings de MCP | inline | commit W3
-- T4 | S2 | Tests: writer del overlay, resolución de configHome, detección y routing (RED→GREEN) | inline | commit W4
-- T5 | S2 | README y docs del paquete actualizados | inline | commit W5
+- T1 | S2 | src/tool-overlay.ts: modelo de overlay + escritura idempotente del drop-in | inline | hecho | commit cb57f4f; tests tool-overlay.test.ts 5/5
+- T2 | S2 | Detección de soporte overlay (gentle-pi >= 4.9.0, solo releases finales) | inline | hecho | commit cb57f4f; tests tool-overlay-detect.test.ts 2/2
+- T3 | S2 | extensions/index.ts: applyCodegraphWiring overlay vs legacy; applyCodegraphSubagents agentFiles:false | inline | hecho | commit cb57f4f; test apply.test.ts S2
+- T4 | S2 | Tests RED→GREEN | inline | hecho | suite completa 330/330
+- T5 | S2 | README (overlay + uninstall) y docs/known-limits.md (divergencia configHome, detección conservadora) | inline | hecho | commit cb57f4f
 
 ## Log
 
@@ -27,3 +27,6 @@ Segundo, la 4.9.0 que tenemos instalado ofrece una nueva arquitectura para indic
 - L5 — Mensaje enviado a la sesión RCA (3a57ea63096844e8aea5e7a789292de6); respuesta recibida (correlation a7a742bc210d4a22aad869be2e8e3983): lo incorpora como F18/E13.
 - L6 — Exploración del overlay 4.9.0 completada (gentle-ai-explore, task mws1jjhk-1-ot0w): overlay en discoverAgents por cada subagent_run; drop-ins en <configHome>/agent-overlays.d/*.json; agentes embarcados ya traen la herramienta y sin marker blocks; edición de archivos rompe managed ownership.
 - L7 — Owner eligió «Overlay + fallback legacy» (opc_overlay_fallback).
+- L8 — Descubierto en fuente de gentle-pi (lib/gentle-shell-bundled.ts): el bundled prefix gana incluso sobre GENTLE_PI_CONFIG_HOME; el test se corrigió contra la fuente, no el código.
+- L9 — Commit cb57f4f en feat/tool-overlay-490 (334 líneas, suite 330/330). Riesgo nombrado: item 3 — una divergencia futura en la resolución de configHome dejaría la herramienta fuera del allowlist en silencio; mitigación documentada en known-limits.md y detección conservadora de versión.
+- L10 — Verificación independiente gentle-ai-verify lanzada sobre el commit (routing overlay/legacy + contractos).
