@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { getAgentDir, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { applyCodegraphSubagents, readExposureWarning, readMissingServerWarning } from "../src/apply.ts";
-import { prepareProject, runCodegraph, type SessionStartReason } from "../src/autoindex.ts";
+import { CHILD_ENV, codegraphEngineVersion, prepareProject, readIndexVersionMarker, runCodegraph, writeIndexVersionMarker, type SessionStartReason } from "../src/autoindex.ts";
 import { compactionSync, realSyncLock } from "../src/compaction-sync.ts";
 import { exploreViaDaemon } from "../src/daemonclient.ts";
 import { realInitLock, isInitRunning } from "../src/initlock.ts";
@@ -28,16 +28,28 @@ function safeRepair(run: () => RepairOutcome): RepairOutcome | undefined {
 	}
 }
 
-// Starts the index sync (or first init) and then the daemon warm-up in the background; the session never waits for them.
+// The engine version is asked once per process; a subagent child or a /reload does no index work worth it.
+let engineVersionProbe: Promise<string | undefined> | undefined;
+function sessionEngineVersion(reason: SessionStartReason): Promise<string | undefined> {
+	if (reason === "reload" || process.env[CHILD_ENV] === "1") return Promise.resolve(undefined);
+	engineVersionProbe ??= codegraphEngineVersion();
+	return engineVersionProbe;
+}
+
+// Starts the index sync (or first init, or a rebuild for a new engine version) and then the daemon warm-up in the
+// background; the session never waits for them.
 function startAutoIndex(reason: SessionStartReason, ctx: ExtensionContext): void {
 	const say = (text: string, level: "info" | "warning") => {
 		if (ctx.hasUI) ctx.ui.notify(`gentle-shell-codegraph-subagents: ${text}`, level);
 	};
-	prepareProject({
+	sessionEngineVersion(reason).then((engineVersion) => prepareProject({
 		cwd: ctx.cwd,
 		env: process.env,
 		reason,
 		exists: existsSync,
+		engineVersion,
+		readIndexVersion: () => readIndexVersionMarker(ctx.cwd, existsSync),
+		writeIndexVersion: (version) => writeIndexVersionMarker(ctx.cwd, version),
 		run: runCodegraph,
 		lock: realInitLock,
 		sync: realSyncLock,
@@ -45,19 +57,22 @@ function startAutoIndex(reason: SessionStartReason, ctx: ExtensionContext): void
 		onStart: (action) => say(
 			action === "init" ? "creating the CodeGraph index of this project..."
 				: action === "seed" ? "seeding this worktree's CodeGraph index from the main repo's index..."
+				: action === "reindex" ? "rebuilding the CodeGraph index for the new CodeGraph version..."
 				: "syncing the CodeGraph index...", "info"),
 		onIndexed: (result) => {
-			if (result.joined) say("another session is creating the CodeGraph index of this project", "info");
+			if (result.joined && result.action === "reindex") say("another session is writing the CodeGraph index of this project; the rebuild for the new CodeGraph version is left to a later session", "info");
+			else if (result.joined) say("another session is creating the CodeGraph index of this project", "info");
 			else if (result.coalesced) say("another session is syncing the CodeGraph index of this project", "info");
 			else if (result.queued) say("the CodeGraph index sync is waiting for the index to be free", "info");
 			else if (result.unavailable) say(`could not coordinate the CodeGraph index sync in ${ctx.cwd}`, "warning");
-			else if (!result.ok) say(`codegraph ${result.action} failed in ${ctx.cwd}`, "warning");
+			else if (!result.ok) say(`codegraph ${result.action === "reindex" ? "index" : result.action} failed in ${ctx.cwd}`, "warning");
 			else say(result.action === "init" ? "CodeGraph index created"
 				: result.action === "seed" ? "CodeGraph index seeded from the main repo and synced"
+				: result.action === "reindex" ? "CodeGraph index rebuilt"
 				: "CodeGraph index synced", "info");
 		},
 		onWarmStart: () => say("warming up CodeGraph...", "info"),
-	})
+	}))
 		.then((result) => {
 			if (result.warm === "ok") say("CodeGraph ready", "info");
 			else if (result.warm === "failed") say(`CodeGraph warm-up failed in ${ctx.cwd}`, "warning");
