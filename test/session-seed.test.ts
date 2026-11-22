@@ -243,10 +243,7 @@ test("a worktree that gained an index while the seed waited for its lock is skip
 	const runs: string[] = [];
 	const result = await seedSessionWorktrees({
 		cwd: repo,
-		exists: (path) => {
-			if (!path.startsWith(worktrees[0]!)) return existsSync(path);
-			return existsSync(path); // real fs query: the stub acquire creates the index before the recheck
-		},
+		exists: (path) => existsSync(path), // the stub acquire creates the index before the recheck reads it
 		sourceBusy: () => false,
 		copy: (from, to) => { copies.push(to); writeFileSync(to, "stale-seed"); return true; },
 		lock: {

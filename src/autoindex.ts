@@ -230,6 +230,10 @@ export async function autoIndex(input: AutoIndexInput): Promise<AutoIndexResult>
 				const busy = input.sourceBusy ?? ((root: string) => (typeof input.lock?.isInitLocked === "function" ? input.lock.isInitLocked(root) : false));
 				if (busy(commonRoot)) return { action, ok: true, joined: true };
 				announce();
+				// The source's version marker is captured while the source is quiet, before the copy binds it to the
+				// copied bytes: reading it after the worktree's sync would label an older copied database with a
+				// newer version the main checkout reached meanwhile, hiding the still-needed rebuild.
+				const sourceVersion = readIndexVersionMarker(commonRoot, input.exists);
 				const seeded = seedWorktreeIndex({
 					worktree: input.cwd,
 					commonRoot,
@@ -239,9 +243,6 @@ export async function autoIndex(input: AutoIndexInput): Promise<AutoIndexResult>
 				if (!seeded) return { action, ok: false };
 				// The seeded db reflects the main tree; the worktree's first sync reconciles it to this tree.
 				const ok = await input.run(["sync", "-q"], input.cwd, SYNC_TIMEOUT_MS, (pid, options) => adopt(pid, options));
-				// The copied index keeps the engine version that built it in the main checkout: recording the running
-				// version here would hide a still-needed rebuild in the worktree. No source marker stays unknown.
-				const sourceVersion = ok ? readIndexVersionMarker(commonRoot, input.exists) : undefined;
 				return ok
 					? { action, ok, ...(sourceVersion !== undefined ? { sourceVersion } : {}) }
 					: { action, ok };
