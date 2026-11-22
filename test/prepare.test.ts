@@ -310,8 +310,12 @@ test("P5/JD-fix: a seed records the SOURCE index's recorded version, never the r
 	// Non-seed builds record the running engine, as before.
 	assert.equal(recordedSeedVersion("1.6.0", "1.6.4", "reindex"), "1.6.4");
 	assert.equal(recordedSeedVersion("1.6.0", "1.6.4", "init"), "1.6.4");
-	// No engine version (unit-style tests): never records.
-	assert.equal(recordedSeedVersion("1.6.0", undefined, "seed"), undefined);
+	// No engine version: seed still honors the source's record (a child seeding has no engine probe).
+	assert.equal(recordedSeedVersion("1.6.0", undefined, "seed"), "1.6.0");
+	assert.equal(recordedSeedVersion(undefined, undefined, "seed"), undefined);
+	// Other actions without an engine version record nothing.
+	assert.equal(recordedSeedVersion("1.6.0", undefined, "reindex"), undefined);
+	assert.equal(recordedSeedVersion("1.6.0", undefined, "sync"), undefined);
 	// A sync records nothing.
 	assert.equal(recordedSeedVersion("1.6.0", "1.6.4", "sync"), undefined);
 });

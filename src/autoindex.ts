@@ -55,9 +55,11 @@ export type IndexVersionState = "current" | "reindex" | "unknown" | "none";
  * unmarked rather than adopted as current.
  */
 export function recordedSeedVersion(sourceVersion: string | undefined, engineVersion: string | undefined, action: IndexResultAction): string | undefined {
+	// A seed binds the copied bytes to the source's own record: it applies even without an engine version
+	// (a subagent child seeding a worktree has none and still must not orphan the source's version).
+	if (action === "seed") return sourceVersion;
 	if (engineVersion === undefined) return undefined;
 	if (action === "reindex" || action === "init") return engineVersion;
-	if (action === "seed") return sourceVersion;
 	return undefined;
 }
 
@@ -228,8 +230,8 @@ export async function autoIndex(input: AutoIndexInput): Promise<AutoIndexResult>
 				if (input.exists(join(input.cwd, ".codegraph"))) return { action, ok: true, joined: true };
 				const commonRoot = (worktreeAction as { action: "seed"; commonRoot: string }).commonRoot;
 				// The source must be quiet while the copy binds its marker and db: any package lock (init or sync) on
-				// the common root counts. InitLock exposes isHeld; the previous fallback probed isInitLocked, which no
-				// implementation provides, so a real lock never fired and the copy could catch a mid-rebuild db.
+				// the common root counts. When the session itself runs inside a worktree, ctx.cwd's lock is not the
+				// source's: the busy check receives the root it actually guards.
 				const busy = input.sourceBusy ?? ((root: string) => typeof input.lock?.isHeld === "function" ? input.lock.isHeld(root) : isInitLocked(root));
 				if (busy(commonRoot)) return { action, ok: true, joined: true };
 				announce();

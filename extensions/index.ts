@@ -149,7 +149,7 @@ export default function (pi: ExtensionAPI) {
 		// worktree is a file copy plus one sync in that tree, so it answers with its own files, not the main
 		// checkout's.
 		if (event.reason !== "reload") {
-			void Promise.resolve().then(() => seedSessionWorktrees({ cwd: ctx.cwd, exists: existsSync, sourceBusy: () => isInitLocked(ctx.cwd), copy: (from, to) => {
+			void Promise.resolve().then(() => seedSessionWorktrees({ cwd: ctx.cwd, exists: existsSync, sourceBusy: (commonRoot) => isInitLocked(ctx.cwd) || isInitLocked(commonRoot), copy: (from, to) => {
 				try { copyFileSync(from, to); return true; } catch { return false; }
 			}, run: runCodegraph, lock: realInitLock })).catch(() => {});
 		}
@@ -164,7 +164,7 @@ export default function (pi: ExtensionAPI) {
 				try {
 					const e = payload as { sessionId?: unknown } | undefined;
 					if (!e || e.sessionId !== ctx.sessionManager.getSessionId()) return;
-					void Promise.resolve().then(() => seedSessionWorktrees({ cwd: ctx.cwd, exists: existsSync, sourceBusy: () => isInitLocked(ctx.cwd), copy: (from, to) => {
+					void Promise.resolve().then(() => seedSessionWorktrees({ cwd: ctx.cwd, exists: existsSync, sourceBusy: (commonRoot) => isInitLocked(ctx.cwd) || isInitLocked(commonRoot), copy: (from, to) => {
 						try { copyFileSync(from, to); return true; } catch { return false; }
 					}, run: runCodegraph, lock: realInitLock })).catch(() => {});
 				} catch { /* a failed event-driven seed just falls back to the next scan */ }
