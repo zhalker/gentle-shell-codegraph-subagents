@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { seedSessionWorktrees } from "../src/session-seed.ts";
 import { SYNC_TIMEOUT_MS } from "../src/autoindex.ts";
-import type { InitLock } from "../src/initlock.ts";
+import { codegraphWritingIndex, type InitLock } from "../src/initlock.ts";
 
 const git = (cwd: string, args: string[]): void => {
 	const r = spawnSync("git", args, { cwd, encoding: "utf8" });
@@ -261,4 +261,49 @@ test("a worktree that gained an index while the seed waited for its lock is skip
 	assert.deepEqual(copies, [], "the finished index is not overwritten by the seed copy");
 	assert.deepEqual(runs, [], "no sync runs against the finished index");
 	assert.deepEqual(result.skipped, [{ worktree: worktrees[0]!.replaceAll("\\", "/"), reason: "already has an index" }]);
+});
+
+test("a seed holding the source lock still copies, and an external codegraph writer still blocks it", async (t) => {
+	const { repo, worktrees, base } = repoWithWorktrees(2);
+	t.after(() => rmSync(base, { recursive: true, force: true }));
+	mkdirSync(join(repo, ".codegraph"));
+	writeFileSync(join(repo, ".codegraph", "codegraph.db"), "seed");
+	const statefulLock = {
+		// Production-shaped: held tracks the real acquire state of every project this seed and others touched.
+		held: {} as Record<string, boolean>,
+		isHeld: (project: string) => statefulLock.held[project] === true,
+		acquire: (project: string) => {
+			statefulLock.held[project] = true; // like the real lock: once acquired, isHeld reports it
+			return { status: "acquired" as const, adopt: () => {}, release: () => { statefulLock.held[project] = false; } };
+		},
+	};
+	const copies: string[] = [];
+	// Case 1: the seed itself holds the source lock; the production busy predicate must still let the copy run.
+	const result = await seedSessionWorktrees({
+		cwd: repo,
+		exists: existsSync,
+		sourceBusy: (root0) => statefulLock.isHeld(root0) || codegraphWritingIndex(root0), // production fallback shape
+		copy: (from, to) => { copies.push(to); writeFileSync(to, "seed"); return true; },
+		lock: statefulLock,
+		run: async () => true,
+	});
+	assert.deepEqual(result.seeded, [...worktrees.map((wt) => join(wt, ".codegraph", "codegraph.db"))], "own source lock does not block the copy");
+	assert.deepEqual(result.skipped, [], JSON.stringify(result.skipped));
+	// Case 2: an external codegraph writer holds the main checkout: every seed copy is now blocked.
+	// The production sourceBusy predicate consults the package lock too, but the seed released every lock it
+	// took in case 1; only the external writer below remains for case 2.
+	writeFileSync(join(repo, ".codegraph", "codegraph.lock"), String(process.pid)); // a live external writer pid
+	for (const file of copies) rmSync(file, { force: true });
+	rmSync(join(worktrees[0]!, ".codegraph"), { recursive: true, force: true });
+	const blocked = await seedSessionWorktrees({
+		cwd: repo,
+		exists: existsSync,
+		sourceBusy: () => codegraphWritingIndex(repo), // external writer visible through the production predicate
+		copy: (from, to) => { copies.push(to); writeFileSync(to, "seed"); return true; },
+		lock: statefulLock,
+		run: async () => true,
+	});
+	assert.deepEqual(blocked.seeded, [], "an external codegraph writer blocks the copy");
+	// The external writer is visible before any worktree work: the session skips seeding entirely.
+	assert.deepEqual(blocked.skipped, [{ worktree: repo, reason: "the session's own index is missing or being written" }], JSON.stringify(blocked.skipped));
 });

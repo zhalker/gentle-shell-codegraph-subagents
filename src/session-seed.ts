@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { worktreeOf } from "./worktree.ts";
 import { seedWorktreeIndex } from "./seed.ts";
 import { SYNC_TIMEOUT_MS } from "./autoindex.ts";
-import type { InitLock } from "./initlock.ts";
+import { codegraphWritingIndex, type InitLock } from "./initlock.ts";
 
 export interface SessionSeedResult {
 	/** The worktree db files that were seeded and then synced, one per worktree that lacked an index. */
@@ -81,7 +81,10 @@ export async function seedSessionWorktrees(input: SessionSeedInput): Promise<Ses
 					if (source?.status === "busy") { result.skipped.push({ worktree: root, reason: "the main checkout's index is being written" }); continue; }
 					let copied = false;
 					try {
-						copied = seedWorktreeIndex({ worktree: root, commonRoot: wt.commonRoot, sourceBusy: input.sourceBusy ?? (() => false), copy: input.copy });
+						// This seed now holds the package lock on the source, so the package's own busy state must not
+						// block its copy (it would see its own lock and skip every worktree). The remaining hazard is an
+						// external writer such as CodeGraph's own process: only its writer lock counts inside our lock.
+						copied = seedWorktreeIndex({ worktree: root, commonRoot: wt.commonRoot, sourceBusy: (root0) => codegraphWritingIndex(root0), copy: input.copy });
 					} finally {
 						source?.release();
 					}
