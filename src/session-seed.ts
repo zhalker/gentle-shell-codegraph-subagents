@@ -18,6 +18,14 @@ export interface SessionSeedInput {
 	exists(path: string): boolean;
 	sourceBusy?(commonRoot: string): boolean;
 	copy(from: string, to: string): boolean;
+	/** The source checkout's recorded index version, or undefined when it has no marker. */
+	readSourceIndexVersion?(commonRoot: string): string | undefined;
+	/** Records the version the copied index carries; absent callers get no marker written. */
+	writeIndexVersion?(version: string): void;
+	/** The source checkout's recorded index version, or undefined when it has no marker. */
+	readSourceIndexVersion?(commonRoot: string): string | undefined;
+	/** Records the version the copied index carries; absent callers get no marker written. */
+	writeIndexVersion?(version: string): void;
 	/**
 	 * Runs `codegraph <args>` in `cwd`; true when it exited 0. This is the sync that follows the copy, so a seeded
 	 * worktree answers with its own tree. Absent means the seed stays copy-only (the unit tests, and any caller
@@ -80,11 +88,15 @@ export async function seedSessionWorktrees(input: SessionSeedInput): Promise<Ses
 					const source = input.lock?.acquire(wt.commonRoot, { kind: "sync" });
 					if (source?.status === "busy") { result.skipped.push({ worktree: root, reason: "the main checkout's index is being written" }); continue; }
 					let copied = false;
+					let sourceVersion: string | undefined;
 					try {
 						// This seed now holds the package lock on the source, so the package's own busy state must not
 						// block its copy (it would see its own lock and skip every worktree). The remaining hazard is an
 						// external writer such as CodeGraph's own process: only its writer lock counts inside our lock.
+						// The source's recorded version is captured under that same lock: it describes the db being copied.
 						copied = seedWorktreeIndex({ worktree: root, commonRoot: wt.commonRoot, sourceBusy: (root0) => codegraphWritingIndex(root0), copy: input.copy });
+						// The source's recorded version is captured under this same lock: it describes the db being copied.
+						sourceVersion = input.readSourceIndexVersion?.(wt.commonRoot);
 					} finally {
 						source?.release();
 					}
@@ -109,6 +121,13 @@ export async function seedSessionWorktrees(input: SessionSeedInput): Promise<Ses
 						}
 					}
 					result.seeded.push(join(root, ".codegraph", "codegraph.db"));
+					// The copied index keeps the source's recorded version: writing the running engine's version here
+					// would mask a needed rebuild. A source without a marker leaves the copy unmarked instead.
+					if (sourceVersion !== undefined) input.writeIndexVersion?.(sourceVersion);
+
+					// The copied index keeps the source's recorded version: writing the running engine's version would
+					// mask a needed rebuild. A source without a marker leaves the copy unmarked instead.
+					if (sourceVersion !== undefined) input.writeIndexVersion?.(sourceVersion);
 				} finally {
 					attempt?.release();
 				}
