@@ -114,13 +114,19 @@ const WAIT = { waitMs: 1_500 };
 test("cleanup: the daemon of a directory this test created is waited for until it leaves on its own, and is never killed", async () => {
 	const dir = ownedDir("pcs-cleanup-own-");
 	const socketPath = pipePath();
-	const pid = await fakeDaemon(socketPath, undefined, 1_000);
+	const pid = await fakeDaemon(socketPath, undefined, undefined, true);
 	writeLock(dir, { pid, socketPath, startedAt: Date.now() });
 	setListing([]);
 	assert.deepEqual(daemonPids(dir), [pid], "the daemon serving the directory is counted");
-	await stopDaemon(dir, { waitMs: 10_000 });
+	const client = net.createConnection(socketPath);
+	client.on("error", () => {});
+	await new Promise<void>((resolve) => client.once("data", () => resolve()));
+	const cleanup = stopDaemon(dir, { waitMs: 10_000 });
+	client.write("bye\n");
+	await cleanup;
 	assert.deepEqual(daemonPids(dir), [], "stopDaemon returns only once no daemon serves the directory");
 	assert.deepEqual(await exits.get(pid), { code: 0, signal: null }, "the daemon left on its own: nothing killed it");
+	client.destroy();
 });
 
 test("cleanup: the wait leaves this test's event loop running, so a client of the daemon in this process can finish and let it leave", async () => {
