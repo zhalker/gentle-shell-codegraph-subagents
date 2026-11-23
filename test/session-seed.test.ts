@@ -307,3 +307,21 @@ test("a seed holding the source lock still copies, and an external codegraph wri
 	// The external writer is visible before any worktree work: the session skips seeding entirely.
 	assert.deepEqual(blocked.skipped, [{ worktree: repo, reason: "the session's own index is missing or being written" }], JSON.stringify(blocked.skipped));
 });
+
+test("without a source lock, a writer starting after the initial gate prevents copying", async (t) => {
+	const { repo, base } = repoWithWorktrees(1);
+	t.after(() => rmSync(base, { recursive: true, force: true }));
+	mkdirSync(join(repo, ".codegraph"));
+	writeFileSync(join(repo, ".codegraph", "codegraph.db"), "seed");
+	let checks = 0;
+	let copies = 0;
+	const result = await seedSessionWorktrees({
+		cwd: repo,
+		exists: existsSync,
+		sourceBusy: () => ++checks > 1,
+		copy: () => { copies++; return true; },
+	});
+	assert.equal(copies, 0);
+	assert.deepEqual(result.seeded, []);
+	assert.equal(result.skipped[0]?.reason, "the seed copy failed");
+});

@@ -151,7 +151,7 @@ export default function (pi: ExtensionAPI) {
 		if (event.reason !== "reload") {
 			void Promise.resolve().then(() => seedSessionWorktrees({ cwd: ctx.cwd, exists: existsSync, sourceBusy: (commonRoot) => isInitLocked(ctx.cwd) || isInitLocked(commonRoot), copy: (from, to) => {
 				try { copyFileSync(from, to); return true; } catch { return false; }
-			}, run: runCodegraph, lock: realInitLock, readSourceIndexVersion: (commonRoot) => readIndexVersionMarker(commonRoot, existsSync), writeIndexVersion: (version) => writeIndexVersionMarker(ctx.cwd, version) })).catch(() => {});
+			}, run: runCodegraph, lock: realInitLock, readSourceIndexVersion: (commonRoot) => readIndexVersionMarker(commonRoot, existsSync), writeIndexVersion: (root, version) => writeIndexVersionMarker(root, version) })).catch(() => {});
 		}
 		// The precise hook, when it exists: gentle-pi emits its session worktree registry event on Pi's shared
 		// extension event bus every time a worktree joins the session's working set (explicit register today).
@@ -166,7 +166,7 @@ export default function (pi: ExtensionAPI) {
 					if (!e || e.sessionId !== ctx.sessionManager.getSessionId()) return;
 					void Promise.resolve().then(() => seedSessionWorktrees({ cwd: ctx.cwd, exists: existsSync, sourceBusy: (commonRoot) => isInitLocked(ctx.cwd) || isInitLocked(commonRoot), copy: (from, to) => {
 						try { copyFileSync(from, to); return true; } catch { return false; }
-					}, run: runCodegraph, lock: realInitLock, readSourceIndexVersion: (commonRoot) => readIndexVersionMarker(commonRoot, existsSync), writeIndexVersion: (version) => writeIndexVersionMarker(ctx.cwd, version) })).catch(() => {});
+					}, run: runCodegraph, lock: realInitLock, readSourceIndexVersion: (commonRoot) => readIndexVersionMarker(commonRoot, existsSync), writeIndexVersion: (root, version) => writeIndexVersionMarker(root, version) })).catch(() => {});
 				} catch { /* a failed event-driven seed just falls back to the next scan */ }
 			});
 			if (typeof unsubscribeWorktreeEvent === "function") pi.on("session_shutdown", () => unsubscribeWorktreeEvent());
