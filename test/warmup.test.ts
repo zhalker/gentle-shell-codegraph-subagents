@@ -25,28 +25,28 @@ function scratchDir(prefix: string): string {
 test("S14 real: warming a project leaves its daemon alive and the warm-up client gone", { skip: !hasCodegraph }, async () => {
 	const dir = indexedProject();
 	try {
-		stopDaemon(dir);
+		await stopDaemon(dir);
 		assert.equal(daemonPids(dir).length, 0);
 		assert.equal(await warmUpDaemon(dir), true);
 		assert.equal(daemonPids(dir).length, 1, "the daemon must survive the warm-up client");
 	} finally {
-		stopDaemon(dir);
+		await stopDaemon(dir);
 	}
 });
 
 test("S14 real: after the warm-up, the first explore of the next client is much faster than on a cold daemon", { skip: !hasCodegraph }, async () => {
 	const dir = indexedProject();
 	try {
-		stopDaemon(dir);
+		await stopDaemon(dir);
 		const cold = await exploreOnce(dir, "warmFn1 run", 120_000);
 		assert.equal(cold.ok, true);
-		stopDaemon(dir);
+		await stopDaemon(dir);
 		assert.equal(await warmUpDaemon(dir), true);
 		const warm = await exploreOnce(dir, "warmFn1 run", 120_000);
 		assert.equal(warm.ok, true);
 		assert.ok(warm.exploreMs < cold.exploreMs * 0.7, `cold ${cold.exploreMs} ms, warm ${warm.exploreMs} ms`);
 	} finally {
-		stopDaemon(dir);
+		await stopDaemon(dir);
 	}
 });
 

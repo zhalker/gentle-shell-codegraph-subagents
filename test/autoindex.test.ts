@@ -362,7 +362,9 @@ test("S17: subagent children and /reload never even look at the lock, unless the
 		lock: fakeLock(log, false), copySeed: (from, to) => { writeFileSync(to, "seed"); return true; }, run: async () => true,
 	});
 	assert.deepEqual(result, { action: "seed", ok: true }, "the child seeds its worktree's own index");
-	assert.deepEqual(log, ["lock:acquire", "lock:release"], JSON.stringify(log));
+	// The seed checks the source checkout's busy state twice: the seed path's own gate, and seedWorktreeIndex's
+	// recheck right before the copy. Both must see a quiet source before any write happens.
+	assert.deepEqual(log, ["lock:acquire", "lock:isHeld", "lock:isHeld", "lock:release"], JSON.stringify(log));
 });
 
 // --- Coordination with the other sessions of this user: startup and compaction syncs never run at the same time. ---

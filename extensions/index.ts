@@ -4,15 +4,16 @@ import { join } from "node:path";
 import { getAgentDir, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { applyCodegraphSubagents, readExposureWarning, readMissingServerWarning } from "../src/apply.ts";
-import { prepareProject, runCodegraph, type SessionStartReason } from "../src/autoindex.ts";
+import { CHILD_ENV, codegraphEngineVersion, prepareProject, readIndexVersionMarker, runCodegraph, writeIndexVersionMarker, type SessionStartReason } from "../src/autoindex.ts";
 import { compactionSync, realSyncLock } from "../src/compaction-sync.ts";
 import { exploreViaDaemon } from "../src/daemonclient.ts";
-import { realInitLock, isInitRunning } from "../src/initlock.ts";
+import { realInitLock, isInitLocked, isInitRunning } from "../src/initlock.ts";
 import { chooseIndexNotice, firstPromptMessage, INDEX_NOTICE_TYPE, logPrefetch, logSync, noticeTools, type PrefetchOutcome } from "../src/index-notice.ts";
 import { explorePerCase, prefetchForExplorer } from "../src/prefetch.ts";
 import { messageText, promptContext, promptMessageLine } from "../src/prompt-context.ts";
 import { seedSessionWorktrees } from "../src/session-seed.ts";
 import { seedWorktreeIndex } from "../src/seed.ts";
+import { applyToolOverlays, findGentlePiVersion, resolveConfigHome, shouldUseOverlay } from "../src/tool-overlay.ts";
 import { worktreeOf } from "../src/worktree.ts";
 import { warmUpDaemon } from "../src/warmup.ts";
 import { repairFrozenAgentFiles, repairNotices, settleAgentFileRepairs, type RepairOutcome } from "../src/repair.ts";
@@ -27,16 +28,28 @@ function safeRepair(run: () => RepairOutcome): RepairOutcome | undefined {
 	}
 }
 
-// Starts the index sync (or first init) and then the daemon warm-up in the background; the session never waits for them.
+// The engine version is asked once per process; a subagent child or a /reload does no index work worth it.
+let engineVersionProbe: Promise<string | undefined> | undefined;
+function sessionEngineVersion(reason: SessionStartReason): Promise<string | undefined> {
+	if (reason === "reload" || process.env[CHILD_ENV] === "1") return Promise.resolve(undefined);
+	engineVersionProbe ??= codegraphEngineVersion();
+	return engineVersionProbe;
+}
+
+// Starts the index sync (or first init, or a rebuild for a new engine version) and then the daemon warm-up in the
+// background; the session never waits for them.
 function startAutoIndex(reason: SessionStartReason, ctx: ExtensionContext): void {
 	const say = (text: string, level: "info" | "warning") => {
 		if (ctx.hasUI) ctx.ui.notify(`gentle-shell-codegraph-subagents: ${text}`, level);
 	};
-	prepareProject({
+	sessionEngineVersion(reason).then((engineVersion) => prepareProject({
 		cwd: ctx.cwd,
 		env: process.env,
 		reason,
 		exists: existsSync,
+		engineVersion,
+		readIndexVersion: () => readIndexVersionMarker(ctx.cwd, existsSync),
+		writeIndexVersion: (version) => writeIndexVersionMarker(ctx.cwd, version),
 		run: runCodegraph,
 		lock: realInitLock,
 		sync: realSyncLock,
@@ -44,19 +57,22 @@ function startAutoIndex(reason: SessionStartReason, ctx: ExtensionContext): void
 		onStart: (action) => say(
 			action === "init" ? "creating the CodeGraph index of this project..."
 				: action === "seed" ? "seeding this worktree's CodeGraph index from the main repo's index..."
+				: action === "reindex" ? "rebuilding the CodeGraph index for the new CodeGraph version..."
 				: "syncing the CodeGraph index...", "info"),
 		onIndexed: (result) => {
-			if (result.joined) say("another session is creating the CodeGraph index of this project", "info");
+			if (result.joined && result.action === "reindex") say("another session is writing the CodeGraph index of this project; the rebuild for the new CodeGraph version is left to a later session", "info");
+			else if (result.joined) say("another session is creating the CodeGraph index of this project", "info");
 			else if (result.coalesced) say("another session is syncing the CodeGraph index of this project", "info");
 			else if (result.queued) say("the CodeGraph index sync is waiting for the index to be free", "info");
 			else if (result.unavailable) say(`could not coordinate the CodeGraph index sync in ${ctx.cwd}`, "warning");
-			else if (!result.ok) say(`codegraph ${result.action} failed in ${ctx.cwd}`, "warning");
+			else if (!result.ok) say(`codegraph ${result.action === "reindex" ? "index" : result.action} failed in ${ctx.cwd}`, "warning");
 			else say(result.action === "init" ? "CodeGraph index created"
 				: result.action === "seed" ? "CodeGraph index seeded from the main repo and synced"
+				: result.action === "reindex" ? "CodeGraph index rebuilt"
 				: "CodeGraph index synced", "info");
 		},
 		onWarmStart: () => say("warming up CodeGraph...", "info"),
-	})
+	}))
 		.then((result) => {
 			if (result.warm === "ok") say("CodeGraph ready", "info");
 			else if (result.warm === "failed") say(`CodeGraph warm-up failed in ${ctx.cwd}`, "warning");
@@ -68,6 +84,28 @@ function startAutoIndex(reason: SessionStartReason, ctx: ExtensionContext): void
 
 // Reapplied on every session start so a reinstall (pi install, gentle-shell install)
 // or a gentle-ai sync that rewrote the agent files is corrected on the next launch.
+// Applies the CodeGraph wiring to gentle-pi: on gentle-pi >= 4.9.0 via the subagent tool overlay
+// (a drop-in JSON under gentle-pi's config home), on older versions by rewriting the agent files.
+// Both paths keep the mcp.json normalization; a failure never throws into session start.
+export function applyCodegraphWiring(ctx: ExtensionContext): { changed: string[]; errors: string[] } {
+	const agentDir = getAgentDir();
+	const overlay = shouldUseOverlay(findGentlePiVersion(agentDir));
+	let wiring: { changed: string[]; errors: string[] };
+	if (overlay) {
+		// Gentle-pi resolves its own config home from the bundled prefix first; our approximation passes
+		// GENTLE_SHELL_PREFIX through and relies on the existing <prefix>/config/gentle-ai existence check.
+		const configHome = resolveConfigHome({ home: homedir(), env: process.env, prefix: process.env.GENTLE_SHELL_PREFIX });
+		const result = applyToolOverlays({ configHome });
+		// In overlay mode the agent files stay untouched, so gentle-pi's installer keeps owning them.
+		const apply = applyCodegraphSubagents(agentDir, { agentFiles: false });
+		wiring = { changed: result.changed, errors: [...result.errors, ...apply.errors] };
+	} else {
+		const apply = applyCodegraphSubagents(agentDir);
+		wiring = { changed: apply.changed, errors: apply.errors };
+	}
+	return wiring;
+}
+
 export default function (pi: ExtensionAPI) {
 	let firstPromptSeen = false;
 	// Runs at load, before gentle-pi's own startup install: a frozen agent file is moved aside here, so that
@@ -107,11 +145,13 @@ export default function (pi: ExtensionAPI) {
 	pi.on("session_start", async (event, ctx) => {
 		startAutoIndex(event.reason, ctx);
 		// Seed the session repo's unindexed worktrees in the background, so the index exists before the first
-		// subagent child is handed one. Never waits, never announces: a skipped worktree costs nothing.
+		// subagent child is handed one. Never waits, never announces: a skipped worktree costs nothing. Each
+		// worktree is a file copy plus one sync in that tree, so it answers with its own files, not the main
+		// checkout's.
 		if (event.reason !== "reload") {
-			void Promise.resolve().then(() => seedSessionWorktrees({ cwd: ctx.cwd, exists: existsSync, sourceBusy: () => isInitRunning(ctx.cwd), copy: (from, to) => {
+			void Promise.resolve().then(() => seedSessionWorktrees({ cwd: ctx.cwd, exists: existsSync, sourceBusy: (commonRoot) => isInitLocked(ctx.cwd) || isInitLocked(commonRoot), copy: (from, to) => {
 				try { copyFileSync(from, to); return true; } catch { return false; }
-			} })).catch(() => {});
+			}, run: runCodegraph, lock: realInitLock, readSourceIndexVersion: (commonRoot) => readIndexVersionMarker(commonRoot, existsSync), writeIndexVersion: (root, version) => writeIndexVersionMarker(root, version) })).catch(() => {});
 		}
 		// The precise hook, when it exists: gentle-pi emits its session worktree registry event on Pi's shared
 		// extension event bus every time a worktree joins the session's working set (explicit register today).
@@ -124,19 +164,19 @@ export default function (pi: ExtensionAPI) {
 				try {
 					const e = payload as { sessionId?: unknown } | undefined;
 					if (!e || e.sessionId !== ctx.sessionManager.getSessionId()) return;
-					void Promise.resolve().then(() => seedSessionWorktrees({ cwd: ctx.cwd, exists: existsSync, sourceBusy: () => isInitRunning(ctx.cwd), copy: (from, to) => {
+					void Promise.resolve().then(() => seedSessionWorktrees({ cwd: ctx.cwd, exists: existsSync, sourceBusy: (commonRoot) => isInitLocked(ctx.cwd) || isInitLocked(commonRoot), copy: (from, to) => {
 						try { copyFileSync(from, to); return true; } catch { return false; }
-					} })).catch(() => {});
+					}, run: runCodegraph, lock: realInitLock, readSourceIndexVersion: (commonRoot) => readIndexVersionMarker(commonRoot, existsSync), writeIndexVersion: (root, version) => writeIndexVersionMarker(root, version) })).catch(() => {});
 				} catch { /* a failed event-driven seed just falls back to the next scan */ }
 			});
 			if (typeof unsubscribeWorktreeEvent === "function") pi.on("session_shutdown", () => unsubscribeWorktreeEvent());
 		} catch { /* without the bus the scan at session start still covers every worktree it sees */ }
 		try {
-			const { changed, errors } = applyCodegraphSubagents(getAgentDir());
+			const { changed, errors } = applyCodegraphWiring(ctx);
 			if (!ctx.hasUI) return;
-			if (changed.length > 0) ctx.ui.notify(`gentle-shell-codegraph-subagents: updated ${changed.length} file(s)`, "info");
+			if (changed.length > 0) ctx.ui.notify(`gentle-shell-codegraph-subagents: updated ${changed.length} item(s)`, "info");
 			notifyRepair(ctx, loadRepair);
-			if (errors.length > 0) ctx.ui.notify(`gentle-shell-codegraph-subagents: ${errors.length} file(s) skipped: ${errors[0]}`, "warning");
+			if (errors.length > 0) ctx.ui.notify(`gentle-shell-codegraph-subagents: ${errors.length} item(s) skipped: ${errors[0]}`, "warning");
 			const registered = pi.getMcpServers?.().some((server) => server.name === "codegraph") ?? false;
 			if (process.env.GENTLE_PI_AGENTS_CHILD !== "1" && readMissingServerWarning(getAgentDir(), ctx.cwd, ctx.isProjectTrusted(), registered)) {
 				ctx.ui.notify("gentle-shell-codegraph-subagents: CodeGraph MCP server was not found in the current configuration. Subagents may not have direct access; configure the server to enable it.", "warning");
@@ -182,7 +222,7 @@ export default function (pi: ExtensionAPI) {
 			// The loaded context files are not inspected: a conflicting rule is neither detected nor reported.
 			if (isUserPrompt) firstPromptSeen = true;
 			const prompt = isUserPrompt ? event.prompt : undefined;
-			// Whatever the prefetch answers, its outcome goes to the log; a prompt never waits for it.
+			// The first prompt does wait for this, bounded by the daemon timeout; its outcome is always logged.
 			let outcome: PrefetchOutcome | undefined;
 			const started = Date.now();
 			const content = await prefetchForExplorer({

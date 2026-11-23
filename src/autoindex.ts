@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
-import { copyFileSync } from "node:fs";
+import { copyFileSync, existsSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { codegraphWritingIndex, isInitLocked, type InitLock } from "./initlock.ts";
 import { killTree } from "./prefetch.ts";
@@ -9,16 +10,111 @@ import { seedWorktreeIndex, worktreeIndexAction, worktreeOf } from "./seed.ts";
 
 export { codegraphWritingIndex } from "./initlock.ts";
 
-/** One of these next to a `.git` is what makes a directory a project worth indexing automatically. */
+/** The one of these next to a `.git` is what makes a directory a project worth indexing automatically. */
 export const INIT_PROJECT_MARKERS = ["composer.json", "package.json", "pyproject.toml", "go.mod", "Cargo.toml", "Gemfile", "pom.xml", "build.gradle", "build.gradle.kts"];
+
+/** File inside `.codegraph/` recording which codegraph engine version left the index complete. */
+export const INDEX_VERSION_MARKER = "indexer-version.json";
+
+/** Where the index-version marker lives for this project. */
+function markerPath(cwd: string): string {
+	return join(cwd, ".codegraph", INDEX_VERSION_MARKER);
+}
+
+/** The engine version recorded for this project's index, or undefined when there is no record. */
+export function readIndexVersionMarker(cwd: string, exists: (path: string) => boolean): string | undefined {
+	const file = markerPath(cwd);
+	if (!exists(file)) return undefined;
+	try {
+		const version = (JSON.parse(readFileSync(file, "utf8")) as { version?: unknown }).version;
+		return typeof version === "string" && version.length > 0 ? version : undefined;
+	} catch {
+		return undefined;
+	}
+}
+
+/** Records that this project's index was (re)built by `version`, atomically: a reader sees the previous marker or the new one, never a truncated file. Never throws. */
+export function writeIndexVersionMarker(cwd: string, version: string, _exists?: (path: string) => boolean): void {
+	const file = markerPath(cwd);
+	const staged = `${file}.${process.pid}.tmp`;
+	try {
+		writeFileSync(staged, JSON.stringify({ version }) + "\n");
+		renameSync(staged, file);
+	} catch {
+		try { unlinkSync(staged); } catch { /* nothing to clean */ }
+		/* an unwritable index directory loses nothing but the next reindex check */
+	}
+}
+
+export type IndexVersionState = "current" | "reindex" | "unknown" | "none";
+
+/**
+ * Which engine version a freshly built or seeded index records. A rebuild and an init built this index with the
+ * running engine; a seed copies the source checkout's index, so it keeps that source's recorded version — the
+ * running version there would hide a still-needed rebuild in the copied index, and an unmarked source stays
+ * unmarked rather than adopted as current.
+ */
+export function recordedSeedVersion(sourceVersion: string | undefined, engineVersion: string | undefined, action: IndexResultAction): string | undefined {
+	// A seed binds the copied bytes to the source's own record: it applies even without an engine version
+	// (a subagent child seeding a worktree has none and still must not orphan the source's version).
+	if (action === "seed") return sourceVersion;
+	if (engineVersion === undefined) return undefined;
+	if (action === "reindex" || action === "init") return engineVersion;
+	return undefined;
+}
+
+/**
+ * Whether this project's index was built by the running engine version. `unknown` is an existing index
+ * without a marker (built by a version of this package that did not record one): the caller reports it but
+ * must not force a reindex of every project after this package's update — CodeGraph itself flags stale
+ * indexes in its answers, so the user learns it either way.
+ */
+export function indexVersionMarker(cwd: string, engineVersion: string | undefined, exists: (path: string) => boolean, read?: () => string | undefined): IndexVersionState {
+	if (!exists(join(cwd, ".codegraph"))) return "none";
+	const recorded = read ? read() : readIndexVersionMarker(cwd, exists);
+	if (recorded === undefined) return "unknown";
+	return recorded === engineVersion ? "current" : "reindex";
+}
+
+/** How long `codegraph --version` may take before the engine version counts as unknown. */
+const VERSION_TIMEOUT_MS = 10_000;
+
+/**
+ * The version of the codegraph engine on Pi's PATH (`codegraph --version`), or undefined when it cannot be told.
+ * Async so a caller can overlap it with other startup work; resolves undefined instead of rejecting.
+ */
+export function codegraphEngineVersion(): Promise<string | undefined> {
+	return new Promise((resolve) => {
+		let output = "";
+		let child;
+		try {
+			// Windows needs a shell for the .cmd shim npm installs; one command line avoids passing args to a shell.
+			child = process.platform === "win32"
+				? spawn("codegraph --version", { cwd: tmpdir(), shell: true, windowsHide: true, stdio: ["ignore", "pipe", "ignore"] })
+				: spawn("codegraph", ["--version"], { cwd: tmpdir(), windowsHide: true, stdio: ["ignore", "pipe", "ignore"] });
+		} catch {
+			resolve(undefined);
+			return;
+		}
+		const timer = setTimeout(() => { killTree(child.pid, child); resolve(undefined); }, VERSION_TIMEOUT_MS);
+		child.stdout?.on("data", (chunk: Buffer) => { output += chunk.toString("utf8"); });
+		child.on("error", () => { clearTimeout(timer); resolve(undefined); });
+		child.on("close", (code) => {
+			clearTimeout(timer);
+			resolve(code === 0 ? /\d+\.\d+\.\d+\S*/.exec(output)?.[0] : undefined);
+		});
+	});
+}
 
 export const SYNC_TIMEOUT_MS = 120_000;
 export const INIT_TIMEOUT_MS = 600_000;
 
-/** The environment variable a subagent child carries; children never start an index operation of their own. */
+/** The environment variable a subagent child carries; it selects which of this package's index decisions a child skips or makes. */
 export const CHILD_ENV = "GENTLE_PI_AGENTS_CHILD";
 
 export type IndexAction = "sync" | "init" | "seed" | "none";
+/** What a session start did: a planned action, or a full rebuild of an index another engine version built. */
+export type IndexResultAction = IndexAction | "reindex";
 export type SessionStartReason = "startup" | "reload" | "new" | "resume" | "fork";
 
 /** What one coordinated sync did here, or why it did not run. */
@@ -68,7 +164,13 @@ export interface AutoIndexInput {
 	/** Copies the seed db from the main repo into the worktree; defaults to a plain file copy. */
 	copySeed?(from: string, to: string): boolean;
 	/** Called right before the command starts, so the user can be told what is going on. */
-	onStart?(action: "sync" | "init" | "seed"): void;
+	onStart?(action: "sync" | "init" | "seed" | "reindex"): void;
+	/** The running codegraph engine version; absent means no version check and no marker (the unit tests). */
+	engineVersion?: string;
+	/** The engine version recorded for this index; defaults to {@link readIndexVersionMarker}. */
+	readIndexVersion?(): string | undefined;
+	/** Records the engine version that (re)built this index; defaults to {@link writeIndexVersionMarker}. */
+	writeIndexVersion?(version: string): void;
 	/** Whether CodeGraph is writing this index right now; defaults to {@link codegraphWritingIndex}. */
 	codegraphBusy?(cwd: string): boolean;
 	/** Runs `codegraph <args>` in `cwd`; true when it exited 0. `onSpawn` gets the pid of that process. */
@@ -96,12 +198,14 @@ function childWorktreeNeedsIndex(input: Pick<AutoIndexInput, "cwd" | "env" | "ex
 }
 
 export interface AutoIndexResult {
-	action: IndexAction;
+	action: IndexResultAction;
 	ok: boolean;
 	/** Another session was already creating the index, so this one left it alone. */
 	joined?: boolean;
 	/** Another session was already syncing, so this one left the sync to it; its run completed. */
 	coalesced?: boolean;
+	/** For a seed: the engine version recorded in the source checkout's marker, when the seeded index kept it. */
+	sourceVersion?: string;
 	/** The request is recorded on disk and still waiting for the index to be free; nothing ran yet. */
 	queued?: boolean;
 	/** The coordination state could not be used, so no sync was started here. */
@@ -125,9 +229,16 @@ export async function autoIndex(input: AutoIndexInput): Promise<AutoIndexResult>
 			try {
 				if (input.exists(join(input.cwd, ".codegraph"))) return { action, ok: true, joined: true };
 				const commonRoot = (worktreeAction as { action: "seed"; commonRoot: string }).commonRoot;
-				const busy = input.sourceBusy ?? ((root: string) => (typeof input.lock?.isInitLocked === "function" ? input.lock.isInitLocked(root) : false));
+				// The source must be quiet while the copy binds its marker and db: any package lock (init or sync) on
+				// the common root counts. When the session itself runs inside a worktree, ctx.cwd's lock is not the
+				// source's: the busy check receives the root it actually guards.
+				const busy = input.sourceBusy ?? ((root: string) => typeof input.lock?.isHeld === "function" ? input.lock.isHeld(root) : isInitLocked(root));
 				if (busy(commonRoot)) return { action, ok: true, joined: true };
 				announce();
+				// The source's version marker is captured while the source is quiet, before the copy binds it to the
+				// copied bytes: reading it after the worktree's sync would label an older copied database with a
+				// newer version the main checkout reached meanwhile, hiding the still-needed rebuild.
+				const sourceVersion = readIndexVersionMarker(commonRoot, input.exists);
 				const seeded = seedWorktreeIndex({
 					worktree: input.cwd,
 					commonRoot,
@@ -137,10 +248,16 @@ export async function autoIndex(input: AutoIndexInput): Promise<AutoIndexResult>
 				if (!seeded) return { action, ok: false };
 				// The seeded db reflects the main tree; the worktree's first sync reconciles it to this tree.
 				const ok = await input.run(["sync", "-q"], input.cwd, SYNC_TIMEOUT_MS, (pid, options) => adopt(pid, options));
-				return { action, ok };
+				return ok
+					? { action, ok, ...(sourceVersion !== undefined ? { sourceVersion } : {}) }
+					: { action, ok };
 			} finally {
 				attempt?.release();
 			}
+		}
+		if (action === "sync" && input.engineVersion !== undefined
+			&& indexVersionMarker(input.cwd, input.engineVersion, input.exists, input.readIndexVersion) === "reindex") {
+			return await reindex(input);
 		}
 		if (action === "sync") {
 			// An init holds the index: nothing may touch it meanwhile, and this session leaves it to that one.
@@ -169,13 +286,31 @@ export async function autoIndex(input: AutoIndexInput): Promise<AutoIndexResult>
 				// CodeGraph's own lock still names a live init: another party is building this index, not this session.
 				return { action, ok: true, joined: true };
 			}
-			// A failure of this session's own init, with or without a half-built index, is a failure.
 			return { action, ok: initialised };
 		} finally {
 			attempt?.release();
 		}
 	} catch {
 		return { action: planIndexAction(input.cwd, input.exists), ok: false };
+	}
+}
+
+/**
+ * Rebuilds an index that another engine version built (`codegraph index`), coordinated exactly like an init: the
+ * init lock covers the whole rebuild and records its process, and a busy lock means another writer is at work,
+ * so this session joins instead of running.
+ */
+async function reindex(input: AutoIndexInput): Promise<AutoIndexResult> {
+	const action = "reindex";
+	const attempt = input.lock?.acquire(input.cwd);
+	if (attempt?.status === "busy") return { action, ok: true, joined: true };
+	const adopt = attempt?.status === "acquired" ? attempt.adopt : () => {};
+	try {
+		try { input.onStart?.(action); } catch { /* telling the user is never worth stopping the index */ }
+		const ok = await input.run(["index", "-q"], input.cwd, INIT_TIMEOUT_MS, (pid, options) => adopt(pid, options));
+		return { action, ok };
+	} finally {
+		attempt?.release();
 	}
 }
 
@@ -284,8 +419,18 @@ export async function prepareProject(input: PrepareInput): Promise<PrepareResult
 	if (index.action !== "none") {
 		try { input.onIndexed?.(index); } catch { /* telling the user is never worth stopping the warm-up */ }
 	}
-	// A sync that failed still leaves an index to warm; a failed init or seed leaves nothing worth warming.
-	const hasIndex = !index.joined && (index.action === "sync" || (index.action === "init" && index.ok) || (index.action === "seed" && index.ok));
+	// Only an index this session built itself records a version: the helper returns the running engine for a
+	// rebuild/init, the source checkout's recorded version for a seed (so a stale source still triggers the
+	// worktree rebuild and an unmarked source stays unknown), and undefined for a sync.
+	const built = index.action === "reindex" || index.action === "init" || index.action === "seed";
+	const recorded = recordedSeedVersion(index.sourceVersion, input.engineVersion, index.action);
+	if (recorded !== undefined && built && index.ok && !index.joined) {
+		try {
+			(input.writeIndexVersion ?? ((version: string) => writeIndexVersionMarker(input.cwd, version)))(recorded);
+		} catch { /* a lost marker costs one more rebuild later, never the warm-up */ }
+	}
+	// A sync or a reindex that failed still leaves an index to warm; a failed init or seed leaves nothing worth warming.
+	const hasIndex = !index.joined && (index.action === "sync" || index.action === "reindex" || (index.action === "init" && index.ok) || (index.action === "seed" && index.ok));
 	if (skipsSession(input) || !hasIndex) return { index, warm: "skipped" };
 	try { input.onWarmStart?.(); } catch { /* telling the user is never worth stopping the warm-up */ }
 	try {
