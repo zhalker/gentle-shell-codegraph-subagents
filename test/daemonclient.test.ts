@@ -314,7 +314,7 @@ const cliExplore = (dir: string, query: string): string =>
 test("S15 real: with the daemon alive, the pipe answers with the same text as the CLI, and faster", { skip: !hasCodegraph }, async () => {
 	const dir = indexedProject();
 	try {
-		stopDaemon(dir);
+		await stopDaemon(dir);
 		assert.equal(await warmUpDaemon(dir), true);
 		const cli = await timed(async () => cliExplore(dir, "warmFn1 run"));
 		const direct = await timed(() => exploreViaDaemon(dir, "warmFn1 run", 20_000));
@@ -322,18 +322,18 @@ test("S15 real: with the daemon alive, the pipe answers with the same text as th
 		assert.equal(norm((direct.value as { text: string }).text), norm(cli.value));
 		assert.ok(direct.ms < cli.ms * 0.6, `cli ${cli.ms} ms, direct ${direct.ms} ms`);
 	} finally {
-		stopDaemon(dir);
+		await stopDaemon(dir);
 	}
 });
 
 test("S15 real: with no daemon it is unavailable and it does not start one", { skip: !hasCodegraph }, async () => {
 	const dir = indexedProject();
 	try {
-		stopDaemon(dir);
+		await stopDaemon(dir);
 		assert.deepEqual(await exploreViaDaemon(dir, "warmFn1 run", 20_000), { status: "unavailable" });
 		assert.equal(daemonPids(dir).length, 0);
 	} finally {
-		stopDaemon(dir);
+		await stopDaemon(dir);
 	}
 });
 
@@ -367,7 +367,7 @@ async function prefetchUntilText(input: ReturnType<typeof explorerInput>, ms: nu
 test("S15 real: no daemon: the prefetch adds nothing at once and its background warm-up serves the next one", { skip: !hasCodegraph }, async () => {
 	const dir = indexedProject();
 	try {
-		stopDaemon(dir);
+		await stopDaemon(dir);
 		const input = explorerInput(dir);
 		const started = Date.now();
 		assert.equal(await prefetchForExplorer(input), undefined, "with no daemon nothing is added");
@@ -375,6 +375,6 @@ test("S15 real: no daemon: the prefetch adds nothing at once and its background 
 		const text = await prefetchUntilText(input, 120_000);
 		assert.match(String(text), /warmFn1/, "the next prefetch must find the daemon warm");
 	} finally {
-		stopDaemon(dir);
+		await stopDaemon(dir);
 	}
 });
